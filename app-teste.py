@@ -1,0 +1,2968 @@
+import streamlit as st
+import streamlit.components.v1 as components
+import json
+import pandas as pd
+import re
+import os
+import base64
+
+# Links oficiais dos Web Apps do Google Apps Script
+APPS_SCRIPT_SAC_WEBAPP_URL = "https://script.google.com/macros/s/AKfycbyGRxQBo5j-gWQ4OEeGFqfwzgjcfQRzDKE2kKbyQeSvOKOdIMr1snR8YV766KBfE7RY9w/exec"
+
+st.set_page_config(
+    page_title="Painel Executivo de Gestão & SAC",
+    page_icon="☕",
+    layout="wide",
+    initial_sidebar_state="collapsed"
+)
+
+st.markdown("""
+<style>
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
+    .block-container {
+        padding-top: 0rem !important;
+        padding-bottom: 0rem !important;
+        padding-left: 0rem !important;
+        padding-right: 0rem !important;
+        max-width: 100% !important;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# ==============================================================================
+# CARREGAMENTO DO LOGOTIPO
+# ==============================================================================
+def obter_logo_base64():
+    pastas_busca = [
+        os.path.dirname(os.path.abspath(__file__)) if "__file__" in locals() else "",
+        os.getcwd(),
+        "."
+    ]
+    nomes_alvo = [
+        "Logotipo.PNG", "Logotipo.png", "logotipo.PNG", "logotipo.png",
+        "LOGOTIPO.PNG", "logo.PNG", "logo.png"
+    ]
+    for pasta in pastas_busca:
+        if not pasta:
+            continue
+        for nome in nomes_alvo:
+            candidato = os.path.join(pasta, nome)
+            if os.path.isfile(candidato):
+                ext = os.path.splitext(candidato)[1].lower().replace(".", "")
+                mime = "jpeg" if ext in ["jpg", "jpeg"] else "png"
+                with open(candidato, "rb") as f:
+                    return f"data:image/{mime};base64,{base64.b64encode(f.read()).decode('utf-8')}"
+    return ""
+
+logo_base64_src = obter_logo_base64()
+
+# IDs e GIDs de Planilhas
+SPREADSHEET_SAC_ID = "1YUS9AwQti0Gl79X-TGCIqZSkOfF0bE0BX5gyDClo3rc"
+GID_SAC_CHAMADOS = "0"
+GID_SAC_CLIENTES = "1332839106"
+GID_SAC_USUARIOS = "437161325"
+
+SPREADSHEET_SAC_CONFIG_ID = "1vOa6QpGPZ6rZ1doT2RRU1SAXWR5usPzv"
+GID_SAC_CONFIGS = "1833376686"
+
+URL_CSV_SAC_CHAMADOS = f"https://docs.google.com/spreadsheets/d/{SPREADSHEET_SAC_ID}/export?format=csv&gid={GID_SAC_CHAMADOS}"
+URL_CSV_SAC_CLIENTES = f"https://docs.google.com/spreadsheets/d/{SPREADSHEET_SAC_ID}/export?format=csv&gid={GID_SAC_CLIENTES}"
+URL_CSV_SAC_CONFIGS = f"https://docs.google.com/spreadsheets/d/{SPREADSHEET_SAC_CONFIG_ID}/export?format=csv&gid={GID_SAC_CONFIGS}"
+URL_CSV_SAC_USUARIOS = f"https://docs.google.com/spreadsheets/d/{SPREADSHEET_SAC_ID}/export?format=csv&gid={GID_SAC_USUARIOS}"
+
+@st.cache_data(ttl=5)
+def carregar_dados_sac():
+    clientes_dados = []
+    cidades_clientes = []
+    lista_clientes_completa = []
+    try:
+        df_cli = pd.read_csv(URL_CSV_SAC_CLIENTES, dtype=str)
+        if df_cli is not None and not df_cli.empty:
+            cols = [c.strip() for c in df_cli.columns]
+
+            def find_cli_col(candidates, default_idx):
+                for cand in candidates:
+                    for c in cols:
+                        if c.lower() == cand.lower():
+                            return c
+                return cols[default_idx] if len(cols) > default_idx else ""
+
+            col_c_cliente = find_cli_col(["Cliente", "cliente"], 0)
+            col_c_local = find_cli_col(["Local", "local"], 1)
+            col_c_local_int = find_cli_col(["Local interno", "Local Interno", "local interno"], 2)
+            col_c_maquina = find_cli_col(["Máquina", "Maquina", "maquina"], 3)
+            col_c_modelo = find_cli_col(["Modelo de máquina", "Modelo de Máquina", "Modelo Maquina", "modelo de maquina"], 4)
+            col_c_filial = find_cli_col(["Filial Responsavel", "Filial Responsável", "Filial", "filial responsavel", "Cidade", "cidade"], 5)
+
+            for idx, r in df_cli.iterrows():
+                def val_de(col):
+                    return str(r[col]).strip() if col and col in r and pd.notna(r[col]) else ""
+
+                cli = val_de(col_c_cliente)
+                loc = val_de(col_c_local)
+                loc_int = val_de(col_c_local_int) or loc
+                maq = val_de(col_c_maquina)
+                mod = val_de(col_c_modelo)
+                filial = val_de(col_c_filial)
+
+                if cli and cli.lower() not in ["nan", "cliente"]:
+                    clientes_dados.append({
+                        "cliente": cli,
+                        "local": loc_int,
+                        "cidade": filial
+                    })
+                    lista_clientes_completa.append({
+                        "linha": idx + 2,
+                        "cliente": cli,
+                        "local": loc,
+                        "localInterno": loc_int,
+                        "maquina": maq,
+                        "modeloMaquina": mod,
+                        "filialResponsavel": filial
+                    })
+                    if filial and filial.lower() not in ["nan", "cidade", "filial", "filial responsável", "filial responsavel"]:
+                        cidades_clientes.append(filial)
+    except Exception:
+        pass
+
+    formas_pagamento = []
+    problemas = []
+    descricoes = []
+    try:
+        df_cfg = pd.read_csv(URL_CSV_SAC_CONFIGS, dtype=str)
+        if df_cfg is not None and not df_cfg.empty:
+            if len(df_cfg.columns) > 0:
+                col_a = df_cfg.columns[0]
+                formas_pagamento = [str(x).strip() for x in df_cfg[col_a].dropna().unique() if str(x).strip() and str(x).lower() not in ["nan", "forma de pagamento", "forma"]]
+            if len(df_cfg.columns) > 11:
+                col_l = df_cfg.columns[11]
+                problemas = [str(x).strip() for x in df_cfg[col_l].dropna().unique() if str(x).strip() and str(x).lower() not in ["nan", "problemas", "problema"]]
+            if len(df_cfg.columns) > 13:
+                col_n = df_cfg.columns[13]
+                descricoes = [str(x).strip() for x in df_cfg[col_n].dropna().unique() if str(x).strip() and str(x).lower() not in ["nan", "descrição", "descricao"]]
+    except Exception:
+        pass
+
+    usuarios_validos = []
+    try:
+        df_usr = pd.read_csv(URL_CSV_SAC_USUARIOS, dtype=str)
+        if df_usr is not None and not df_usr.empty:
+            col_nome = df_usr.columns[0]
+            col_u = df_usr.columns[1] if len(df_usr.columns) > 1 else col_nome
+            col_s = df_usr.columns[2] if len(df_usr.columns) > 2 else col_u
+            col_acesso = df_usr.columns[3] if len(df_usr.columns) > 3 else ""
+
+            for _, r in df_usr.iterrows():
+                nome = str(r[col_nome]).strip() if pd.notna(r[col_nome]) else ""
+                u = str(r[col_u]).strip().lower() if pd.notna(r[col_u]) else ""
+                s = str(r[col_s]).strip().lower() if pd.notna(r[col_s]) else ""
+                acesso = str(r[col_acesso]).strip() if (col_acesso and pd.notna(r[col_acesso])) else "Atendente"
+
+                if u and u not in ["nan", "usuario", "usuário", "login"]:
+                    usuarios_validos.append({
+                        "nome": nome or u,
+                        "usuario": u,
+                        "senha": s,
+                        "acesso": acesso if acesso else "Atendente"
+                    })
+    except Exception:
+        pass
+
+    maior_sac_ano = {}
+    chamados_salvos = []
+    try:
+        df_ch = pd.read_csv(URL_CSV_SAC_CHAMADOS, dtype=str)
+        if df_ch is not None and not df_ch.empty:
+            cols = [c.strip() for c in df_ch.columns]
+            
+            def get_col(candidates):
+                for cand in candidates:
+                    for c in cols:
+                        if c.lower() == cand.lower():
+                            return c
+                return None
+
+            col_chamado = get_col(["Chamado", "chamado"]) or cols[0]
+            col_data = get_col(["Data", "data"]) or (cols[1] if len(cols) > 1 else "")
+            col_cli = get_col(["Cliente", "cliente"]) or (cols[2] if len(cols) > 2 else "")
+            col_loc = get_col(["Local Interno", "local interno", "localInterno"]) or (cols[3] if len(cols) > 3 else "")
+            col_cid = get_col(["Filial Responsável", "Filial Responsavel", "Cidade", "cidade"]) or (cols[4] if len(cols) > 4 else "")
+            col_desc = get_col(["Descrição", "Descricao", "descricao"]) or (cols[5] if len(cols) > 5 else "")
+            col_prod = get_col(["Produto", "produto"]) or (cols[6] if len(cols) > 6 else "")
+            col_dt_trans = get_col(["Data da Transação", "Data da Transacao", "dataTransacao"]) or (cols[7] if len(cols) > 7 else "")
+            col_hr_trans = get_col(["Hora da Transação", "Hora da Transacao", "horaTransacao"]) or (cols[8] if len(cols) > 8 else "")
+            col_val = get_col(["Valor", "Valor(R$)", "valor"]) or (cols[9] if len(cols) > 9 else "")
+            col_nome_atend = get_col(["Nome/Sobrenome", "Nome", "nomeSobrenome"]) or (cols[10] if len(cols) > 10 else "")
+            col_cel = get_col(["Celular", "celular"]) or (cols[11] if len(cols) > 11 else "")
+            col_prob = get_col(["Problemas", "Problema", "problemas"]) or (cols[12] if len(cols) > 12 else "")
+            col_pag = get_col(["Forma de Pagamento", "Forma Pagamento", "formaPgto", "forma de pagamento"]) or (cols[13] if len(cols) > 13 else "")
+            col_reemb = get_col(["Reembolso", "reembolso", "Reebolso"])
+            col_pix = get_col(["Pix - Reembolso", "Pix", "pix"])
+            col_atend = get_col(["Atendente", "atendente"])
+            col_dthr = get_col(["Data/Hora do lançamento", "Data/Hora", "dataHoraLancamento"])
+            
+            col_reemb_realizado = get_col([
+                "Reembolso Realizado", "reembolsoRealizado", "Reembolso Realizado?", 
+                "Reemb. Pago?", "Reemb Pago", "Reembolso Pago", "Pago", "reembolso_realizado"
+            ])
+            if not col_reemb_realizado and len(cols) >= 19:
+                col_reemb_realizado = cols[18]
+
+            col_fin_resp = get_col([
+                "Financeiro Responsavel", "Financeiro Responsável", "financeiroResponsavel",
+                "Financeiro", "Resp Financeiro", "Resp. Financeiro"
+            ])
+            if not col_fin_resp and len(cols) >= 20:
+                col_fin_resp = cols[19]
+
+            col_obs = get_col([
+                "Observação", "Observacao", "observacao", "observação", 
+                "Observações", "Observacoes", "Obs", "obs"
+            ])
+            if not col_obs and len(cols) >= 21:
+                col_obs = cols[20]
+
+            for idx, r in df_ch.iterrows():
+                val = str(r[col_chamado]).strip() if col_chamado and pd.notna(r[col_chamado]) else ""
+                if not val or val.lower() in ["nan", "chamado"]:
+                    continue
+
+                m = re.search(r'SAC-(\d{4})-(\d+)', val, re.IGNORECASE)
+                if m:
+                    ano = m.group(1)
+                    seq = int(m.group(2))
+                    maior_sac_ano[ano] = max(maior_sac_ano.get(ano, 0), seq)
+
+                def get_val(col_name):
+                    return str(r[col_name]).strip() if col_name and col_name in r and pd.notna(r[col_name]) else ""
+
+                val_reemb_real = get_val(col_reemb_realizado)
+                if not val_reemb_real:
+                    val_reemb_real = "Não"
+
+                chamados_salvos.append({
+                    "linha": idx + 2,
+                    "chamado": val,
+                    "data": get_val(col_data),
+                    "cliente": get_val(col_cli),
+                    "localInterno": get_val(col_loc),
+                    "cidade": get_val(col_cid),
+                    "descricao": get_val(col_desc),
+                    "produto": get_val(col_prod),
+                    "dataTransacao": get_val(col_dt_trans),
+                    "horaTransacao": get_val(col_hr_trans),
+                    "valor": get_val(col_val),
+                    "nomeSobrenome": get_val(col_nome_atend),
+                    "celular": get_val(col_cel),
+                    "problemas": get_val(col_prob),
+                    "formaPgto": get_val(col_pag),
+                    "reembolso": get_val(col_reemb),
+                    "pix": get_val(col_pix),
+                    "atendente": get_val(col_atend),
+                    "dataHoraLancamento": get_val(col_dthr),
+                    "reembolsoRealizado": val_reemb_real,
+                    "financeiroResponsavel": get_val(col_fin_resp),
+                    "observacao": get_val(col_obs)
+                })
+    except Exception:
+        pass
+
+    chamados_salvos.reverse()
+
+    return {
+        "clientes": clientes_dados,
+        "cadastro_clientes": lista_clientes_completa,
+        "formas_pagamento": sorted(formas_pagamento),
+        "cidades": sorted(list(set(cidades_clientes))),
+        "problemas": sorted(problemas),
+        "descricoes": sorted(descricoes),
+        "usuarios": usuarios_validos,
+        "maior_sac_ano": maior_sac_ano,
+        "chamados": chamados_salvos
+    }
+
+dados_sac = carregar_dados_sac()
+dados_sac_json = json.dumps(dados_sac, ensure_ascii=False)
+total_chamados_carregados = len(dados_sac["chamados"])
+
+html_code = f"""
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Dashboard Executivo - Gestão SAC</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2"></script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <style>
+    body {{ 
+      font-family: 'Inter', system-ui, -apple-system, sans-serif; 
+      background-color: #f1f5f9; 
+      color: #1e293b; 
+      margin: 0;
+      padding: 0;
+    }}
+    .kpi-card {{
+      background-color: #ffffff;
+      border: 1px solid #e2e8f0;
+      transition: transform 0.2s ease, box-shadow 0.2s ease;
+    }}
+    .kpi-card:hover {{
+      transform: translateY(-2px);
+      box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
+    }}
+    .nav-btn.active {{ 
+      background-color: #0284c7; 
+      color: #ffffff; 
+      box-shadow: 0 4px 6px -1px rgba(2, 132, 199, 0.25);
+    }}
+    .nav-btn.inactive {{ 
+      background-color: #ffffff; 
+      color: #64748b; 
+      border: 1px solid #e2e8f0; 
+    }}
+
+    .table-fixed-layout {{
+      table-layout: fixed !important;
+      width: 100% !important;
+      border-collapse: collapse;
+    }}
+    .table-fixed-layout th, 
+    .table-fixed-layout td {{
+      overflow: hidden !important;
+      text-overflow: ellipsis !important;
+      white-space: nowrap !important;
+      padding-top: 0.35rem !important;
+      padding-bottom: 0.35rem !important;
+      padding-left: 0.25rem !important;
+      padding-right: 0.25rem !important;
+      font-size: 10.5px !important;
+    }}
+  </style>
+</head>
+<body class="bg-slate-100 min-h-screen">
+
+  <iframe name="target_post_frame" id="target_post_frame" style="display:none; width:0; height:0; border:0;"></iframe>
+  <form id="hiddenSACSubmissionForm" action="{APPS_SCRIPT_SAC_WEBAPP_URL}" method="POST" target="target_post_frame" style="display:none;">
+    <input type="hidden" name="data" id="hiddenSACSubmissionData">
+  </form>
+
+  <!-- MODAL DE PROCESSAMENTO -->
+  <div id="modalLoadingAcao" class="hidden fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
+    <div class="bg-white rounded-3xl p-6 sm:p-8 max-w-sm w-full shadow-2xl border border-slate-100 flex flex-col items-center text-center space-y-4 animate-in fade-in zoom-in duration-200">
+      <div id="modalIconContainer" class="w-16 h-16 rounded-2xl bg-sky-50 text-sky-600 flex items-center justify-center shadow-inner">
+        <svg id="modalSpinner" class="animate-spin h-8 w-8 text-sky-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+          <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path>
+        </svg>
+        <i id="modalIconCheck" data-lucide="check" class="hidden w-8 h-8 text-emerald-600"></i>
+        <i id="modalIconTrash" data-lucide="trash-2" class="hidden w-8 h-8 text-rose-600"></i>
+      </div>
+      <div>
+        <h3 id="modalLoadingTitle" class="text-base font-bold text-slate-900">Processando Ação...</h3>
+        <p id="modalLoadingSub" class="text-xs text-slate-500 mt-1">Sua solicitação está sendo transmitida e registrada.</p>
+      </div>
+      <div id="modalProgressBar" class="w-full bg-slate-100 h-1.5 rounded-full overflow-hidden">
+        <div class="bg-sky-500 h-full w-2/3 animate-pulse"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- TELA INICIAL DE LOGIN -->
+  <div id="systemLoginScreen" class="w-full flex justify-center pt-8 sm:pt-12 px-4 pb-12">
+    <div class="max-w-md w-full bg-white p-8 sm:p-10 rounded-3xl border border-slate-200 shadow-2xl space-y-6">
+      <div class="text-center space-y-3">
+        <div class="inline-flex items-center justify-center p-2 bg-white rounded-2xl border border-slate-200 shadow-sm mx-auto overflow-hidden" style="height: 64px; min-width: 64px;">
+          <img src="{logo_base64_src}" alt="Logotipo" class="max-h-12 w-auto object-contain" onerror="this.style.display='none'; document.getElementById('loginFallbackIcon').style.display='flex';">
+          <div id="loginFallbackIcon" style="display: {'none' if logo_base64_src else 'flex'};" class="w-12 h-12 bg-amber-700 text-white rounded-xl items-center justify-center font-black text-base">
+            ☕
+          </div>
+        </div>
+        <div>
+          <h2 class="text-xl font-black text-slate-900">Acesso ao Sistema</h2>
+          <p class="text-xs text-slate-500 mt-0.5">Painel Executivo de Gestão, SAC & Atendimento</p>
+        </div>
+      </div>
+
+      <form id="globalLoginForm" onsubmit="realizarLoginGlobal(event)" class="space-y-4">
+        <div>
+          <label class="block text-xs font-bold text-slate-700 mb-1">Usuário para Login *</label>
+          <input type="text" id="globalLoginUser" placeholder="Digite seu usuário..." required oninput="this.value = this.value.toLowerCase()" class="w-full text-sm lowercase rounded-xl border border-slate-300 bg-slate-50 px-3.5 py-2.5 text-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-500 font-medium">
+        </div>
+        <div>
+          <label class="block text-xs font-bold text-slate-700 mb-1">Senha *</label>
+          <input type="password" id="globalLoginPass" placeholder="••••••••" required oninput="this.value = this.value.toLowerCase()" class="w-full text-sm rounded-xl border border-slate-300 bg-slate-50 px-3.5 py-2.5 text-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-500">
+        </div>
+        <div id="globalLoginErro" class="hidden p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs font-semibold flex items-center gap-2">
+          <i data-lucide="alert-circle" class="w-4 h-4"></i>
+          <span>Usuário ou senha incorretos!</span>
+        </div>
+        <button type="submit" class="w-full py-3 px-4 rounded-xl bg-sky-600 hover:bg-sky-700 text-white font-bold text-xs shadow-lg shadow-sky-600/25 transition flex items-center justify-center gap-2 cursor-pointer">
+          <i data-lucide="log-in" class="w-4 h-4"></i>
+          Entrar no Sistema
+        </button>
+      </form>
+    </div>
+  </div>
+
+  <!-- CONTAINER DO SISTEMA LOGADO -->
+  <div id="systemAppContainer" class="hidden">
+    <header class="sticky top-0 z-40 bg-white/95 border-b border-slate-200 backdrop-blur-md px-6 py-3">
+      <div class="max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-center gap-4">
+        <div class="flex items-center gap-4">
+          <div class="flex items-center justify-center p-1 bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden" style="height: 54px; min-width: 54px;">
+            <img id="headerLogoImg" src="{logo_base64_src}" alt="Logotipo" class="max-h-12 w-auto object-contain" onerror="this.style.display='none'; document.getElementById('headerFallbackIcon').style.display='flex';">
+            <div id="headerFallbackIcon" style="display: {'none' if logo_base64_src else 'flex'};" class="w-10 h-10 bg-amber-700 text-white rounded-lg items-center justify-center font-black text-sm">
+              ☕
+            </div>
+          </div>
+          <div>
+            <h1 class="text-xl font-bold tracking-tight text-slate-900 flex items-center gap-2">
+              Painel Executivo de Gestão & SAC
+            </h1>
+            <p class="text-xs text-slate-500">Controle Operacional, Atendimento & Análises · {total_chamados_carregados} chamados registrados</p>
+          </div>
+        </div>
+        
+        <div class="flex items-center gap-3 flex-wrap">
+          <div class="flex items-center gap-2 bg-slate-100 p-1.5 rounded-2xl border border-slate-200 flex-wrap">
+            <button id="navDashboardSAC" type="button" class="nav-btn active flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold transition" onclick="switchPage('dashboardSAC')">
+              <i data-lucide="bar-chart-3" class="w-4 h-4"></i>
+              Dashboard SAC
+            </button>
+            <button id="navSAC" type="button" class="nav-btn inactive flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold transition" onclick="switchPage('sac')">
+              <i data-lucide="headphones" class="w-4 h-4"></i>
+              Lançamento SAC
+            </button>
+            <button id="navChamadosAbertos" type="button" class="nav-btn inactive flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold transition" onclick="switchPage('chamadosAbertos')">
+              <i data-lucide="inbox" class="w-4 h-4"></i>
+              Chamados Abertos
+            </button>
+            <button id="navCadastroClientes" type="button" class="hidden nav-btn inactive flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold transition" onclick="switchPage('cadastroClientes')">
+              <i data-lucide="user-plus" class="w-4 h-4"></i>
+              Cadastro de Clientes
+            </button>
+            <button type="button" onclick="executarRefresh()" title="Clique para recarregar da planilha" class="inline-flex items-center px-3 py-1.5 rounded-xl text-xs font-semibold bg-emerald-50 text-emerald-800 border border-emerald-300 hover:bg-emerald-100 cursor-pointer transition">
+              <span class="w-2 h-2 rounded-full bg-emerald-500 mr-2 animate-pulse"></span> Sincronizar 🔄
+            </button>
+          </div>
+
+          <div class="flex items-center gap-2 bg-white px-3 py-1.5 rounded-2xl border border-slate-200 shadow-sm">
+            <div class="text-right">
+              <span id="labelHeaderAtendente" class="text-xs font-bold text-slate-800 block">Atendente</span>
+              <span id="badgeHeaderNivelAcesso" class="text-[10px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200 inline-block">Geral</span>
+            </div>
+            <button type="button" onclick="realizarLogoutGlobal()" title="Sair do Sistema" class="p-2 rounded-xl hover:bg-rose-50 text-slate-400 hover:text-rose-600 transition cursor-pointer">
+              <i data-lucide="log-out" class="w-4 h-4"></i>
+            </button>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <main class="max-w-7xl mx-auto px-3 sm:px-6 py-3 sm:py-4 space-y-6">
+
+      <!-- PÁGINA 1: DASHBOARD SAC -->
+      <div id="pageDashboardSAC" class="space-y-6">
+        <!-- FILTROS GERAIS -->
+        <section class="bg-white p-5 rounded-2xl shadow-sm border border-slate-200">
+          <div class="flex items-center justify-between mb-3">
+            <div class="flex items-center gap-2 text-sm font-semibold text-slate-700">
+              <i data-lucide="sliders" class="w-4 h-4 text-sky-500"></i>
+              <span>Filtros do Painel SAC</span>
+            </div>
+            <span id="badgeFiltroSAC" class="text-xs font-medium text-slate-500">Filtrando: Todos os chamados</span>
+          </div>
+
+          <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            <div>
+              <label class="block text-xs font-medium text-slate-500 mb-1">Cliente</label>
+              <select id="filterSACCliente" class="w-full text-sm rounded-xl border border-slate-300 bg-slate-50 px-3 py-2 text-slate-800">
+                <option value="ALL">Todos os Clientes</option>
+              </select>
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-slate-500 mb-1">Produto</label>
+              <select id="filterSACProduto" class="w-full text-sm rounded-xl border border-slate-300 bg-slate-50 px-3 py-2 text-slate-800">
+                <option value="ALL">Todos os Produtos</option>
+                <option value="Café">Café</option>
+                <option value="Snaky">Snaky</option>
+              </select>
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-slate-500 mb-1">Atendente</label>
+              <select id="filterSACAtendente" class="w-full text-sm rounded-xl border border-slate-300 bg-slate-50 px-3 py-2 text-slate-800">
+                <option value="ALL">Todos os Atendentes</option>
+              </select>
+            </div>
+            <div class="flex items-end">
+              <button id="btnLimparFiltrosSAC" class="w-full py-2 px-4 rounded-xl border border-slate-300 bg-slate-100 text-xs font-semibold text-slate-600 hover:bg-slate-200 transition flex items-center justify-center gap-1.5 cursor-pointer">
+                <i data-lucide="rotate-ccw" class="w-3.5 h-3.5"></i>
+                Limpar Filtros
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <!-- CARDS KPIS DO SAC -->
+        <section class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
+          <div class="kpi-card p-4 rounded-2xl shadow-sm flex flex-col justify-between">
+            <div class="flex items-center justify-between">
+              <span class="text-[11px] font-semibold text-slate-500 uppercase tracking-wider">Total de Chamados</span>
+              <span class="p-1.5 rounded-lg bg-sky-50 text-sky-600"><i data-lucide="headphones" class="w-4 h-4"></i></span>
+            </div>
+            <div class="mt-3">
+              <span id="kpiSACTotal" class="text-xl font-bold tracking-tight text-slate-800">0</span>
+              <p id="kpiSACTotalSub" class="text-[11px] text-slate-400 mt-0.5">Ocorrências registradas</p>
+            </div>
+          </div>
+
+          <div class="kpi-card p-4 rounded-2xl shadow-sm flex flex-col justify-between border-emerald-200">
+            <div class="flex items-center justify-between">
+              <span class="text-[11px] font-semibold text-emerald-600 uppercase tracking-wider">Valor Ressarcido</span>
+              <span class="p-1.5 rounded-lg bg-emerald-50 text-emerald-600"><i data-lucide="badge-dollar-sign" class="w-4 h-4"></i></span>
+            </div>
+            <div class="mt-3">
+              <span id="kpiSACValorTotal" class="text-xl font-bold tracking-tight text-emerald-600">R$ 0,00</span>
+              <p class="text-[11px] text-slate-400 mt-0.5">Soma coluna J (Valor)</p>
+            </div>
+          </div>
+
+          <div class="kpi-card p-4 rounded-2xl shadow-sm flex flex-col justify-between border-amber-200">
+            <div class="flex items-center justify-between">
+              <span class="text-[11px] font-semibold text-amber-600 uppercase tracking-wider">Chamados Café</span>
+              <span class="p-1.5 rounded-lg bg-amber-50 text-amber-600"><i data-lucide="coffee" class="w-4 h-4"></i></span>
+            </div>
+            <div class="mt-3 flex items-baseline justify-between">
+              <div>
+                <span id="kpiSACCafé" class="text-xl font-bold tracking-tight text-amber-700">0</span>
+                <p class="text-[11px] text-slate-400 mt-0.5">Linha de Bebidas</p>
+              </div>
+              <span id="kpiSACCaféPct" class="text-xs font-semibold px-2 py-0.5 rounded-md bg-amber-100 text-amber-800">0%</span>
+            </div>
+          </div>
+
+          <div class="kpi-card p-4 rounded-2xl shadow-sm flex flex-col justify-between border-indigo-200">
+            <div class="flex items-center justify-between">
+              <span class="text-[11px] font-semibold text-indigo-600 uppercase tracking-wider">Chamados Snaky</span>
+              <span class="p-1.5 rounded-lg bg-indigo-50 text-indigo-600"><i data-lucide="cookie" class="w-4 h-4"></i></span>
+            </div>
+            <div class="mt-3 flex items-baseline justify-between">
+              <div>
+                <span id="kpiSACSnaky" class="text-xl font-bold tracking-tight text-indigo-600">0</span>
+                <p class="text-[11px] text-slate-400 mt-0.5">Máquinas de Snacks</p>
+              </div>
+              <span id="kpiSACSnakyPct" class="text-xs font-semibold px-2 py-0.5 rounded-md bg-indigo-100 text-indigo-800">0%</span>
+            </div>
+          </div>
+
+          <div class="kpi-card p-4 rounded-2xl shadow-sm flex flex-col justify-between">
+            <div class="flex items-center justify-between">
+              <span class="text-[11px] font-semibold text-slate-500 uppercase tracking-wider">Clientes Únicos</span>
+              <span class="p-1.5 rounded-lg bg-blue-50 text-blue-600"><i data-lucide="building" class="w-4 h-4"></i></span>
+            </div>
+            <div class="mt-3">
+              <span id="kpiSACClientes" class="text-xl font-bold tracking-tight text-slate-800">0</span>
+              <p class="text-[11px] text-slate-400 mt-0.5">Pontos atendidos</p>
+            </div>
+          </div>
+
+          <div class="kpi-card p-4 rounded-2xl shadow-sm flex flex-col justify-between">
+            <div class="flex items-center justify-between">
+              <span class="text-[11px] font-semibold text-slate-500 uppercase tracking-wider">Ticket Médio</span>
+              <span class="p-1.5 rounded-lg bg-cyan-50 text-cyan-600"><i data-lucide="calculator" class="w-4 h-4"></i></span>
+            </div>
+            <div class="mt-3">
+              <span id="kpiSACTicketMedio" class="text-xl font-bold tracking-tight text-slate-800">R$ 0,00</span>
+              <p class="text-[11px] text-slate-400 mt-0.5">Média por chamado</p>
+            </div>
+          </div>
+        </section>
+
+        <!-- GRÁFICOS: TOP PROBLEMAS & ATENDENTES -->
+        <section class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex flex-col justify-between">
+            <div class="flex items-center justify-between mb-3">
+              <div>
+                <h3 class="font-bold text-base text-slate-800 flex items-center gap-2">
+                  <i data-lucide="bar-chart-2" class="w-4 h-4 text-sky-600"></i>
+                  Top 10 Problemas Mais Frequentes
+                </h3>
+                <p class="text-xs text-slate-400">Classificação de ocorrências no SAC</p>
+              </div>
+              <span class="text-[11px] font-semibold px-2 py-0.5 rounded bg-sky-50 text-sky-700 border border-sky-200">Ocorrências</span>
+            </div>
+            <div class="relative h-80"><canvas id="chartTopProblemasSAC"></canvas></div>
+          </div>
+
+          <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex flex-col justify-between">
+            <div class="flex items-center justify-between mb-3">
+              <div>
+                <h3 class="font-bold text-base text-slate-800 flex items-center gap-2">
+                  <i data-lucide="users" class="w-4 h-4 text-emerald-600"></i>
+                  Chamados por Atendente
+                </h3>
+                <p class="text-xs text-slate-400">Volume de atendimentos realizados</p>
+              </div>
+              <span class="text-[11px] font-semibold px-2 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200">Volume</span>
+            </div>
+            <div class="relative h-80"><canvas id="chartAtendentesSAC"></canvas></div>
+          </div>
+        </section>
+
+        <!-- NOVO: GRÁFICOS DO DIA COM TOP 5 (QUANTIDADE & VALORES R$) -->
+        <section class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm space-y-4">
+          <div class="flex flex-col sm:flex-row sm:items-center justify-between pb-3 border-b border-slate-100 gap-3">
+            <div>
+              <h3 class="font-bold text-base text-slate-800 flex items-center gap-2">
+                <i data-lucide="calendar" class="w-4 h-4 text-sky-600"></i>
+                Top 5 Locais do Dia (Quantidade & Valores R$)
+              </h3>
+              <p class="text-xs text-slate-400">Ranking diário de locais com foco no mês atual</p>
+            </div>
+            <div class="flex items-center gap-2">
+              <label class="text-[11px] font-bold text-slate-500">Dia de Referência:</label>
+              <input type="date" id="filterDiaTop5" onchange="atualizarGraficosTop5Dia()" class="text-xs rounded-xl border border-slate-300 bg-slate-50 px-2.5 py-1 text-slate-700 font-semibold">
+            </div>
+          </div>
+
+          <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <div class="p-3 rounded-xl bg-slate-50 border border-slate-100">
+              <h4 class="text-xs font-bold text-slate-700 mb-2 flex items-center gap-1.5">
+                <i data-lucide="hash" class="w-3.5 h-3.5 text-sky-600"></i> Top 5 do Dia: Quantidade
+              </h4>
+              <div class="relative h-72"><canvas id="chartTop5DiaQtd"></canvas></div>
+            </div>
+            <div class="p-3 rounded-xl bg-slate-50 border border-slate-100">
+              <h4 class="text-xs font-bold text-slate-700 mb-2 flex items-center gap-1.5">
+                <i data-lucide="badge-dollar-sign" class="w-3.5 h-3.5 text-emerald-600"></i> Top 5 do Dia: Valores (R$)
+              </h4>
+              <div class="relative h-72"><canvas id="chartTop5DiaVal"></canvas></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- NOVO: LISTAS TOP 3 LOCAIS INTERNOS RESUMIDOS POR PROBLEMA (MÊS, DIA, ÚLTIMOS 7 DIAS) -->
+        <section class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <!-- 1. Top 3 do Mês -->
+          <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex flex-col justify-between">
+            <div>
+              <div class="flex flex-col gap-1 pb-3 mb-3 border-b border-slate-100">
+                <div class="flex items-center justify-between">
+                  <h3 class="font-bold text-xs uppercase tracking-wider text-slate-800 flex items-center gap-1.5">
+                    <i data-lucide="calendar-check" class="w-4 h-4 text-sky-600"></i> Top 3 Locais: Mês
+                  </h3>
+                  <input type="month" id="filterResumoMes" onchange="atualizarResumoTop3Mes()" class="text-[11px] rounded-lg border border-slate-300 bg-slate-50 px-2 py-0.5 text-slate-700">
+                </div>
+                <p class="text-[11px] text-slate-400">Resumo de problemas no mês selecionado</p>
+              </div>
+              <div id="listaResumoTop3Mes" class="space-y-3">
+                <p class="text-xs text-slate-400 text-center py-4">Sem dados no período.</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- 2. Top 3 do Dia -->
+          <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex flex-col justify-between">
+            <div>
+              <div class="flex flex-col gap-1 pb-3 mb-3 border-b border-slate-100">
+                <div class="flex items-center justify-between">
+                  <h3 class="font-bold text-xs uppercase tracking-wider text-slate-800 flex items-center gap-1.5">
+                    <i data-lucide="clock" class="w-4 h-4 text-amber-600"></i> Top 3 Locais: Dia
+                  </h3>
+                  <input type="date" id="filterResumoDia" onchange="atualizarResumoTop3Dia()" class="text-[11px] rounded-lg border border-slate-300 bg-slate-50 px-2 py-0.5 text-slate-700">
+                </div>
+                <p class="text-[11px] text-slate-400">Resumo de problemas no dia específico</p>
+              </div>
+              <div id="listaResumoTop3Dia" class="space-y-3">
+                <p class="text-xs text-slate-400 text-center py-4">Sem dados no período.</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- 3. Top 3 dos Últimos 7 Dias (com filtro de dia e filial) -->
+          <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex flex-col justify-between">
+            <div>
+              <div class="flex flex-col gap-2 pb-3 mb-3 border-b border-slate-100">
+                <div class="flex items-center justify-between">
+                  <h3 class="font-bold text-xs uppercase tracking-wider text-slate-800 flex items-center gap-1.5">
+                    <i data-lucide="calendar-range" class="w-4 h-4 text-emerald-600"></i> Top 3: Últimos 7 Dias
+                  </h3>
+                  <input type="date" id="filterResumo7DiasDtFim" onchange="atualizarResumoTop37Dias()" class="text-[11px] rounded-lg border border-slate-300 bg-slate-50 px-2 py-0.5 text-slate-700">
+                </div>
+                <div class="flex items-center justify-between gap-2">
+                  <label class="text-[10px] font-bold text-slate-500 uppercase">Filial:</label>
+                  <select id="filterResumo7DiasFilial" onchange="atualizarResumoTop37Dias()" class="text-[11px] w-48 rounded-lg border border-slate-300 bg-slate-50 px-2 py-0.5 text-slate-700">
+                    <option value="ALL">Todas as Filiais</option>
+                  </select>
+                </div>
+              </div>
+              <div id="listaResumoTop37Dias" class="space-y-3">
+                <p class="text-xs text-slate-400 text-center py-4">Sem dados no período.</p>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- SEPARADOS: TOP 5 LOCAIS NO MÊS ANTERIOR & TOP 5 LOCAIS NO MÊS ATUAL -->
+        <section class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex flex-col justify-between">
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between mb-3 gap-2">
+              <div>
+                <h3 class="font-bold text-base text-slate-800 flex items-center gap-2">
+                  <i data-lucide="calendar-arrow-down" class="w-4 h-4 text-slate-600"></i>
+                  Top 5 Locais: Mês Anterior
+                </h3>
+                <p class="text-xs text-slate-400">Ranking dos 5 locais mais demandados no mês anterior</p>
+              </div>
+              <div class="flex items-center gap-2">
+                <label class="text-[11px] font-bold text-slate-500">Mês Anterior:</label>
+                <input type="month" id="filterMesLocaisAnterior" onchange="atualizarGraficoLocaisAnterior()" class="text-xs rounded-xl border border-slate-300 bg-slate-50 px-2 py-1 text-slate-700">
+              </div>
+            </div>
+            <div class="relative h-80"><canvas id="chartLocaisAnterior"></canvas></div>
+          </div>
+
+          <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex flex-col justify-between">
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between mb-3 gap-2">
+              <div>
+                <h3 class="font-bold text-base text-slate-800 flex items-center gap-2">
+                  <i data-lucide="calendar-check" class="w-4 h-4 text-indigo-600"></i>
+                  Top 5 Locais: Mês Atual
+                </h3>
+                <p class="text-xs text-slate-400">Ranking dos 5 locais mais demandados no mês atual</p>
+              </div>
+              <div class="flex items-center gap-2">
+                <label class="text-[11px] font-bold text-slate-500">Mês Atual:</label>
+                <input type="month" id="filterMesLocaisAtual" onchange="atualizarGraficoLocaisAtual()" class="text-xs rounded-xl border border-slate-300 bg-slate-50 px-2 py-1 text-slate-700">
+              </div>
+            </div>
+            <div class="relative h-80"><canvas id="chartLocaisAtual"></canvas></div>
+          </div>
+        </section>
+
+        <!-- SEPARADOS: CHAMADOS POR MÊS (QUANTIDADE) & CHAMADOS POR MÊS (VALORES R$) -->
+        <section class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex flex-col justify-between">
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between mb-3 gap-2">
+              <div>
+                <h3 class="font-bold text-base text-slate-800 flex items-center gap-2">
+                  <i data-lucide="bar-chart" class="w-4 h-4 text-sky-600"></i>
+                  Chamados por Mês (Quantidade)
+                </h3>
+                <p class="text-xs text-slate-400">Total mensal de ocorrências registradas</p>
+              </div>
+              <div class="flex items-center gap-2">
+                <label class="text-[11px] font-bold text-slate-500">Ano:</label>
+                <select id="filterAnoMesesQtd" onchange="atualizarGraficoMesesQtd()" class="text-xs rounded-xl border border-slate-300 bg-slate-50 px-2.5 py-1 text-slate-700 font-semibold"></select>
+              </div>
+            </div>
+            <div class="relative h-80"><canvas id="chartMesesQtd"></canvas></div>
+          </div>
+
+          <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex flex-col justify-between">
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between mb-3 gap-2">
+              <div>
+                <h3 class="font-bold text-base text-slate-800 flex items-center gap-2">
+                  <i data-lucide="badge-dollar-sign" class="w-4 h-4 text-emerald-600"></i>
+                  Valores Ressarcidos por Mês (R$)
+                </h3>
+                <p class="text-xs text-slate-400">Total financeiro mensal reembolsado</p>
+              </div>
+              <div class="flex items-center gap-2">
+                <label class="text-[11px] font-bold text-slate-500">Ano:</label>
+                <select id="filterAnoMesesVal" onchange="atualizarGraficoMesesVal()" class="text-xs rounded-xl border border-slate-300 bg-slate-50 px-2.5 py-1 text-slate-700 font-semibold"></select>
+              </div>
+            </div>
+            <div class="relative h-80"><canvas id="chartMesesVal"></canvas></div>
+          </div>
+        </section>
+
+        <!-- SEPARADOS: CHAMADOS POR DIA (QUANTIDADE) & CHAMADOS POR DIA (VALORES R$) -->
+        <section class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex flex-col justify-between">
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between mb-3 gap-2">
+              <div>
+                <h3 class="font-bold text-base text-slate-800 flex items-center gap-2">
+                  <i data-lucide="calendar-days" class="w-4 h-4 text-sky-600"></i>
+                  Chamados por Dia (Quantidade)
+                </h3>
+                <p class="text-xs text-slate-400">Dias com atendimentos registrados no mês</p>
+              </div>
+              <div class="flex items-center gap-2">
+                <label class="text-[11px] font-bold text-slate-500">Mês:</label>
+                <input type="month" id="filterMesDiasQtd" onchange="atualizarGraficoDiasQtd()" class="text-xs rounded-xl border border-slate-300 bg-slate-50 px-2 py-1 text-slate-700">
+              </div>
+            </div>
+            <div class="relative h-80"><canvas id="chartDiasQtd"></canvas></div>
+          </div>
+
+          <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex flex-col justify-between">
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between mb-3 gap-2">
+              <div>
+                <h3 class="font-bold text-base text-slate-800 flex items-center gap-2">
+                  <i data-lucide="trending-up" class="w-4 h-4 text-amber-600"></i>
+                  Valores por Dia (R$)
+                </h3>
+                <p class="text-xs text-slate-400">Dias com reembolsos registrados no mês</p>
+              </div>
+              <div class="flex items-center gap-2">
+                <label class="text-[11px] font-bold text-slate-500">Mês:</label>
+                <input type="month" id="filterMesDiasVal" onchange="atualizarGraficoDiasVal()" class="text-xs rounded-xl border border-slate-300 bg-slate-50 px-2 py-1 text-slate-700">
+              </div>
+            </div>
+            <div class="relative h-80"><canvas id="chartDiasVal"></canvas></div>
+          </div>
+        </section>
+
+        <!-- TOP 10 LOCAIS NA SEMANA/PERÍODO & TOP 3 LOCAIS POR FILIAL -->
+        <section class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex flex-col justify-between">
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between mb-3 gap-2">
+              <div>
+                <h3 class="font-bold text-base text-slate-800 flex items-center gap-2">
+                  <i data-lucide="map-pin" class="w-4 h-4 text-rose-600"></i>
+                  Top 10 Locais na Semana (Período)
+                </h3>
+                <p class="text-xs text-slate-400">Foco dinâmico padrão nos últimos 7 dias</p>
+              </div>
+              <div class="flex items-center gap-1.5 flex-wrap">
+                <input type="date" id="filterTopSemanaDtIni" onchange="atualizarGraficoTopSemana()" class="text-xs rounded-xl border border-slate-300 bg-slate-50 px-2 py-1 text-slate-700">
+                <span class="text-xs text-slate-400">até</span>
+                <input type="date" id="filterTopSemanaDtFim" onchange="atualizarGraficoTopSemana()" class="text-xs rounded-xl border border-slate-300 bg-slate-50 px-2 py-1 text-slate-700">
+              </div>
+            </div>
+            <div class="relative h-80"><canvas id="chartTop10Semana"></canvas></div>
+          </div>
+
+          <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex flex-col justify-between">
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between mb-3 gap-2">
+              <div>
+                <h3 class="font-bold text-base text-slate-800 flex items-center gap-2">
+                  <i data-lucide="building-2" class="w-4 h-4 text-amber-600"></i>
+                  Top 3 Locais por Filial (Período)
+                </h3>
+                <p class="text-xs text-slate-400">Locais com maior volume por filial responsável</p>
+              </div>
+              <div class="flex items-center gap-2 flex-wrap">
+                <select id="filterTopFilialSelect" onchange="atualizarGraficoTopFilial()" class="text-xs rounded-xl border border-slate-300 bg-slate-50 px-2 py-1 text-slate-700 font-semibold"></select>
+                <input type="date" id="filterTopFilialDtIni" onchange="atualizarGraficoTopFilial()" class="text-xs rounded-xl border border-slate-300 bg-slate-50 px-2 py-1 text-slate-700">
+                <span class="text-xs text-slate-400">até</span>
+                <input type="date" id="filterTopFilialDtFim" onchange="atualizarGraficoTopFilial()" class="text-xs rounded-xl border border-slate-300 bg-slate-50 px-2 py-1 text-slate-700">
+              </div>
+            </div>
+            <div class="relative h-80"><canvas id="chartTop3Filial"></canvas></div>
+          </div>
+        </section>
+      </div>
+
+      <!-- PÁGINA 2: LANÇAMENTO SAC -->
+      <div id="pageSAC" class="hidden space-y-4">
+        <div id="sacMainPanel" class="space-y-4">
+          <div id="alertSACEditMode" class="hidden p-3 sm:p-4 rounded-2xl bg-amber-50 border border-amber-300 text-amber-900 flex justify-between items-center shadow-sm">
+            <div class="flex items-center gap-3">
+              <div class="p-2 bg-amber-500 text-white rounded-xl"><i data-lucide="edit-3" class="w-5 h-5"></i></div>
+              <div>
+                <p class="text-sm font-bold">Modo de Edição de Chamado: <span id="labelSACEditChamado" class="font-mono text-amber-800">SAC-0000-0000</span></p>
+                <p class="text-xs text-amber-700">Você está alterando este chamado do SAC. O atendente criador e a data/hora original de abertura serão mantidos.</p>
+              </div>
+            </div>
+            <button type="button" onclick="cancelarEdicaoSAC()" class="px-3 py-1.5 bg-amber-200 hover:bg-amber-300 rounded-xl text-xs font-bold text-amber-900 transition cursor-pointer">
+              Cancelar Edição ✕
+            </button>
+          </div>
+
+          <div id="alertSACSuccess" class="hidden p-4 rounded-2xl bg-emerald-50 border border-emerald-200 text-emerald-900 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-sm transition">
+            <div class="flex items-center gap-3">
+              <div id="alertSACIconBadge" class="p-2 bg-emerald-600 text-white rounded-xl">
+                <i id="alertSACLucideIcon" data-lucide="check-circle" class="w-5 h-5"></i>
+              </div>
+              <div>
+                <p id="alertSACSuccessTitle" class="text-sm font-bold">Ação realizada com sucesso!</p>
+                <p id="alertSACSuccessSub" class="text-xs text-emerald-700">A planilha oficial foi atualizada em tempo real.</p>
+              </div>
+            </div>
+            <button type="button" onclick="document.getElementById('alertSACSuccess').classList.add('hidden')" class="px-3 py-2 rounded-xl hover:bg-emerald-100 text-xs font-semibold text-emerald-800 transition cursor-pointer">
+              Fechar
+            </button>
+          </div>
+
+          <section class="bg-white p-4 sm:p-5 rounded-2xl shadow-sm border border-slate-200">
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between pb-3 mb-4 border-b border-slate-100 gap-3">
+              <div class="flex items-center gap-3">
+                <div class="p-2 bg-sky-600 text-white rounded-xl shadow-lg shadow-sky-500/25">
+                  <i data-lucide="headphones" class="w-5 h-5"></i>
+                </div>
+                <div>
+                  <h2 id="sacFormTitleText" class="text-base font-bold text-slate-900">Lançamento de Ocorrências do SAC</h2>
+                  <p class="text-xs text-slate-500">Registro de chamados, ressarcimentos e reembolsos · Aba: Chamados</p>
+                </div>
+              </div>
+              <div class="flex items-center gap-3">
+                <div class="text-right">
+                  <span class="text-[10px] uppercase font-bold text-slate-400 block">Atendente Conectado</span>
+                  <div class="flex items-center gap-1.5 justify-end">
+                    <span id="labelSACAtendenteLogado" class="text-xs font-bold text-sky-800 bg-sky-50 px-2.5 py-0.5 rounded-lg border border-sky-200">Operador</span>
+                    <span id="badgeNivelAcesso" class="text-[10px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">Geral</span>
+                  </div>
+                </div>
+                <button type="button" onclick="realizarLogoutGlobal()" title="Sair do Sistema" class="p-2 rounded-xl border border-slate-200 hover:bg-rose-50 text-slate-500 hover:text-rose-600 transition cursor-pointer">
+                  <i data-lucide="log-out" class="w-4 h-4"></i>
+                </button>
+              </div>
+            </div>
+
+            <form id="sacForm" onsubmit="handleSACSubmit(event)" class="space-y-4">
+              <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3 p-3.5 sm:p-4 rounded-2xl bg-slate-50/90 border border-slate-200">
+                <div>
+                  <label class="block text-xs font-bold text-sky-900 mb-1">Chamado (Automático) *</label>
+                  <input type="text" id="sacChamado" readonly class="w-full text-sm font-mono font-black rounded-xl border border-sky-300 bg-white px-3 py-1.5 text-sky-700 cursor-not-allowed shadow-inner" placeholder="[Automático do Servidor]">
+                  <span class="text-[10px] text-slate-400 mt-0.5 block">🔒 Número atômico gerado no envio</span>
+                </div>
+                <div>
+                  <label class="block text-xs font-semibold text-slate-700 mb-1">Data *</label>
+                  <input type="date" id="sacData" required class="w-full text-sm rounded-xl border border-slate-300 bg-white px-3 py-1.5 text-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-500">
+                </div>
+                <div>
+                  <label class="block text-xs font-semibold text-slate-700 mb-1">Cliente *</label>
+                  <input list="listaSACClientes" id="sacCliente" placeholder="Selecione o cliente..." required onchange="validarInputComLista('sacCliente', 'listaSACClientes', 'Cliente', true)" onblur="validarInputComLista('sacCliente', 'listaSACClientes', 'Cliente', true)" class="w-full text-sm font-semibold rounded-xl border border-slate-300 bg-white px-3 py-1.5 text-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-500">
+                  <datalist id="listaSACClientes"></datalist>
+                </div>
+                <div>
+                  <label class="block text-xs font-semibold text-slate-700 mb-1">Local Interno *</label>
+                  <select id="sacLocalInterno" required onchange="aoMudarLocalInternoSAC()" class="w-full text-sm rounded-xl border border-slate-300 bg-white px-3 py-1.5 text-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-500">
+                    <option value="">Selecione primeiro o Cliente...</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="block text-xs font-semibold text-slate-700 mb-1">Filial Responsável *</label>
+                  <input list="listaSACCidades" id="sacCidade" placeholder="Filial de atendimento..." required onchange="validarInputComLista('sacCidade', 'listaSACCidades', 'Filial Responsável')" onblur="validarInputComLista('sacCidade', 'listaSACCidades', 'Filial Responsável')" class="w-full text-sm rounded-xl border border-slate-300 bg-white px-3 py-1.5 text-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-500">
+                  <datalist id="listaSACCidades"></datalist>
+                </div>
+                <div class="md:col-span-2 lg:col-span-3">
+                  <label class="block text-xs font-semibold text-slate-700 mb-1">Descrição *</label>
+                  <input list="listaSACDescricoes" id="sacDescricao" placeholder="Selecione a descrição do ocorrido..." required onchange="validarInputComLista('sacDescricao', 'listaSACDescricoes', 'Descrição')" onblur="validarInputComLista('sacDescricao', 'listaSACDescricoes', 'Descrição')" class="w-full text-sm rounded-xl border border-slate-300 bg-white px-3 py-1.5 text-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-500">
+                  <datalist id="listaSACDescricoes"></datalist>
+                </div>
+                <div>
+                  <label class="block text-xs font-semibold text-slate-700 mb-1">Produto *</label>
+                  <select id="sacProduto" required class="w-full text-sm font-semibold rounded-xl border border-slate-300 bg-white px-3 py-1.5 text-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-500">
+                    <option value="" selected disabled>Selecione o Produto...</option>
+                    <option value="Café">Café</option>
+                    <option value="Snaky">Snaky</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="block text-xs font-semibold text-slate-700 mb-1">Data da Transação *</label>
+                  <input type="date" id="sacDataTransacao" required class="w-full text-sm rounded-xl border border-slate-300 bg-white px-3 py-1.5 text-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-500">
+                </div>
+                <div>
+                  <label class="block text-xs font-semibold text-slate-700 mb-1">Hora da Transação *</label>
+                  <input type="time" id="sacHoraTransacao" required class="w-full text-sm rounded-xl border border-slate-300 bg-white px-3 py-1.5 text-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-500">
+                </div>
+                <div>
+                  <label class="block text-xs font-semibold text-emerald-800 mb-1">Valor (R$) *</label>
+                  <input type="number" step="0.01" min="0" id="sacValor" placeholder="0,00" required class="w-full text-sm font-bold rounded-xl border border-emerald-300 bg-white px-3 py-1.5 text-emerald-900 focus:outline-none focus:ring-2 focus:ring-emerald-500">
+                </div>
+                <div class="md:col-span-2">
+                  <label class="block text-xs font-semibold text-slate-700 mb-1">Nome / Sobrenome *</label>
+                  <input type="text" id="sacNome" placeholder="Ex: João Da Silva" required onblur="formatarNomeProprio(this)" class="w-full text-sm rounded-xl border border-slate-300 bg-white px-3 py-1.5 text-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-500">
+                </div>
+                <div class="md:col-span-2">
+                  <label class="block text-xs font-semibold text-slate-700 mb-1">Celular *</label>
+                  <input type="text" id="sacCelular" placeholder="(00) 00000-0000" required class="w-full text-sm rounded-xl border border-slate-300 bg-white px-3 py-1.5 text-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-500">
+                </div>
+                <div class="md:col-span-2">
+                  <label class="block text-xs font-semibold text-slate-700 mb-1">Problemas *</label>
+                  <input list="listaSACProblemas" id="sacProblema" placeholder="Selecione o problema..." required onchange="validarInputComLista('sacProblema', 'listaSACProblemas', 'Problemas')" onblur="validarInputComLista('sacProblema', 'listaSACProblemas', 'Problemas')" class="w-full text-sm rounded-xl border border-slate-300 bg-white px-3 py-1.5 text-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-500">
+                  <datalist id="listaSACProblemas"></datalist>
+                </div>
+                <div class="md:col-span-2">
+                  <label class="block text-xs font-semibold text-slate-700 mb-1">Forma de Pagamento *</label>
+                  <input list="listaSACFormasPgto" id="sacFormaPgto" placeholder="Selecione a forma de pagamento..." required onchange="validarInputComLista('sacFormaPgto', 'listaSACFormasPgto', 'Forma de Pagamento')" onblur="validarInputComLista('sacFormaPgto', 'listaSACFormasPgto', 'Forma de Pagamento')" class="w-full text-sm rounded-xl border border-slate-300 bg-white px-3 py-1.5 text-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-500">
+                  <datalist id="listaSACFormasPgto"></datalist>
+                </div>
+                <div class="md:col-span-2">
+                  <label class="block text-xs font-bold text-sky-900 mb-1">Reembolso</label>
+                  <select id="sacReembolso" class="w-full text-sm font-semibold rounded-xl border border-sky-300 bg-white px-3 py-1.5 text-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-500">
+                    <option value="" selected>Selecione o reembolso...</option>
+                    <option value="Devolução Stone">Devolução Stone</option>
+                    <option value="Pendente">Pendente</option>
+                    <option value="Crédito Remoto">Crédito Remoto</option>
+                  </select>
+                </div>
+                <div class="md:col-span-2">
+                  <label class="block text-xs font-semibold text-slate-700 mb-1">Pix - Reembolso</label>
+                  <input type="text" id="sacPix" placeholder="Chave Pix (CPF, Celular, E-mail ou Aleatória)..." class="w-full text-sm rounded-xl border border-slate-300 bg-white px-3 py-1.5 text-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-500">
+                </div>
+                <div>
+                  <label class="block text-xs font-bold text-emerald-800 mb-1">Reembolso Realizado? *</label>
+                  <select id="sacReembolsoRealizado" required class="w-full text-sm font-bold rounded-xl border border-emerald-300 bg-white px-3 py-1.5 text-emerald-900 focus:outline-none focus:ring-2 focus:ring-emerald-500 shadow-sm">
+                    <option value="Não" selected>Não</option>
+                    <option value="Sim">Sim</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="block text-xs font-semibold text-slate-700 mb-1">Atendente *</label>
+                  <input type="text" id="sacAtendente" readonly class="w-full text-sm font-semibold rounded-xl border border-slate-300 bg-slate-100 px-3 py-1.5 text-slate-700 cursor-not-allowed">
+                </div>
+                <div class="md:col-span-2 lg:col-span-2">
+                  <label class="block text-xs font-bold text-indigo-900 mb-1">Observação</label>
+                  <input type="text" id="sacObservacao" placeholder="Notas, histórico de contato ou detalhes adicionais..." class="w-full text-sm rounded-xl border border-indigo-200 bg-white px-3 py-1.5 text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                </div>
+                <div class="md:col-span-2 lg:col-span-2">
+                  <label class="block text-xs font-semibold text-slate-700 mb-1">Data/Hora Lançamento</label>
+                  <input type="text" id="sacDataHoraAuto" readonly value="Automático no Envio" class="w-full text-sm rounded-xl border border-slate-300 bg-slate-100 px-3 py-1.5 text-slate-500 cursor-not-allowed">
+                </div>
+              </div>
+
+              <div class="flex items-center justify-end gap-3 pt-3 border-t border-slate-100">
+                <button type="button" onclick="limparFormSAC()" class="px-4 py-2 rounded-xl border border-slate-300 bg-white text-xs font-semibold text-slate-600 hover:bg-slate-50 transition cursor-pointer">
+                  Limpar Campos
+                </button>
+                <button type="submit" id="btnSalvarSAC" class="flex items-center gap-2 px-5 py-2 rounded-xl bg-sky-600 text-white text-xs font-bold shadow-lg shadow-sky-500/25 hover:bg-sky-700 transition cursor-pointer">
+                  <i data-lucide="send" class="w-4 h-4"></i>
+                  <span id="btnSalvarSACText">Lançar Ocorrência SAC</span>
+                </button>
+              </div>
+            </form>
+          </section>
+
+          <!-- LISTA DE TODOS OS CHAMADOS REALIZADOS (COM FORMA DE PGTO) -->
+          <section class="bg-white p-4 sm:p-5 rounded-2xl border border-slate-200 shadow-sm space-y-4 overflow-hidden">
+            <div class="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-3 border-b border-slate-100">
+              <div>
+                <h2 class="text-base font-bold flex items-center gap-2 text-slate-800">
+                  <i data-lucide="list-checks" class="w-4 h-4 text-sky-600"></i>
+                  Chamados Realizados no SAC
+                </h2>
+                <p class="text-xs text-slate-500">Histórico completo de ocorrências registradas na aba Chamados</p>
+              </div>
+              <div class="flex items-center gap-3">
+                <div class="relative">
+                  <i data-lucide="search" class="w-4 h-4 text-slate-400 absolute left-3 top-2.5"></i>
+                  <input type="text" id="searchSACChamados" placeholder="Buscar chamado, cliente, obs..." oninput="filtrarChamadosSAC()" class="text-xs pl-9 pr-3 py-2 rounded-xl border border-slate-300 bg-slate-50 text-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-500 w-64">
+                </div>
+                <span id="badgeContadorSAC" class="text-xs px-2.5 py-1 rounded-lg bg-sky-50 text-sky-700 font-bold border border-sky-200">
+                  0 chamado(s)
+                </span>
+              </div>
+            </div>
+
+            <div class="w-full overflow-hidden">
+              <table class="table-fixed-layout text-slate-600">
+                <thead class="bg-slate-50 uppercase font-bold text-slate-500 text-[10px]">
+                  <tr>
+                    <th style="width: 5%;" class="rounded-l-lg text-center">Ações</th>
+                    <th style="width: 8%;" class="font-mono">Chamado</th>
+                    <th style="width: 7%;">Data</th>
+                    <th style="width: 10%;">Cliente</th>
+                    <th style="width: 8%;">Local</th>
+                    <th style="width: 7%;">Filial</th>
+                    <th style="width: 5%;">Produto</th>
+                    <th style="width: 6%;" class="text-right">Valor</th>
+                    <th style="width: 9%;">Nome Cliente</th>
+                    <th style="width: 7%;">Forma Pgto</th>
+                    <th style="width: 8%;">Reembolso</th>
+                    <th style="width: 5%;" class="text-center">Pago?</th>
+                    <th style="width: 7%;">Fin. Resp.</th>
+                    <th style="width: 9%;">Observação</th>
+                    <th style="width: 7%;" class="rounded-r-lg">Atendente</th>
+                  </tr>
+                </thead>
+                <tbody id="tableSACChamadosBody" class="divide-y divide-slate-100">
+                  <tr>
+                    <td colspan="15" class="text-center py-6 text-slate-400 font-semibold">Nenhum chamado registrado ainda.</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+      </div>
+
+      <!-- PÁGINA 3: TODOS OS CHAMADOS ABERTOS (COM FORMA DE PGTO) -->
+      <div id="pageChamadosAbertos" class="space-y-6 hidden">
+        <section class="bg-white p-4 sm:p-5 rounded-2xl border border-slate-200 shadow-sm space-y-4 overflow-hidden">
+          <div class="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-3 border-b border-slate-100">
+            <div class="flex items-center gap-3">
+              <div class="p-2.5 bg-sky-600 text-white rounded-xl shadow-lg shadow-sky-500/20">
+                <i data-lucide="inbox" class="w-6 h-6"></i>
+              </div>
+              <div>
+                <h2 class="text-base font-bold text-slate-800 flex items-center gap-2">
+                  Todos os Chamados Abertos
+                </h2>
+                <p class="text-xs text-slate-500">Lista com status de reembolso, observações, financeiro responsável e edição SAC</p>
+              </div>
+            </div>
+
+            <div class="flex items-center gap-3">
+              <div class="relative">
+                <i data-lucide="search" class="w-4 h-4 text-slate-400 absolute left-3 top-2.5"></i>
+                <input type="text" id="searchAbertos" placeholder="Filtrar chamado, cliente, obs..." oninput="filtrarChamadosAbertos()" class="text-xs pl-9 pr-3 py-2 rounded-xl border border-slate-300 bg-slate-50 text-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-500 w-64">
+              </div>
+              <span id="badgeContadorAbertos" class="text-xs px-2.5 py-1 rounded-lg bg-sky-50 text-sky-700 font-bold border border-sky-200">
+                0 chamado(s)
+              </span>
+            </div>
+          </div>
+
+          <div class="w-full overflow-hidden">
+            <table class="table-fixed-layout text-slate-600">
+              <thead class="bg-slate-50 uppercase font-bold text-slate-500 text-[10px]">
+                <tr>
+                  <th style="width: 8%;" class="rounded-l-lg font-mono">Chamado</th>
+                  <th style="width: 7%;">Data</th>
+                  <th style="width: 11%;">Cliente</th>
+                  <th style="width: 6%;" class="text-right">Valor</th>
+                  <th style="width: 11%;">Nome do Cliente</th>
+                  <th style="width: 9%;">Forma Pgto</th>
+                  <th style="width: 10%;">Pix - Reembolso</th>
+                  <th style="width: 5%;" class="text-center">Pago?</th>
+                  <th style="width: 9%;">Fin. Responsável</th>
+                  <th style="width: 19%;">Observação</th>
+                  <th style="width: 5%;" class="rounded-r-lg text-center">Ação</th>
+                </tr>
+              </thead>
+              <tbody id="tableChamadosAbertosBody" class="divide-y divide-slate-100">
+                <tr>
+                  <td colspan="11" class="text-center py-6 text-slate-400 font-semibold">Nenhum chamado aberto encontrado.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+
+      <!-- PÁGINA 4: CADASTRO DE CLIENTES -->
+      <div id="pageCadastroClientes" class="hidden space-y-6">
+        <div id="bloqueioAcessoClientes" class="hidden max-w-lg mx-auto my-12 bg-white p-8 rounded-3xl border border-slate-200 shadow-xl text-center space-y-4">
+          <div class="w-16 h-16 rounded-2xl bg-rose-50 text-rose-600 flex items-center justify-center mx-auto shadow-inner">
+            <i data-lucide="shield-alert" class="w-8 h-8"></i>
+          </div>
+          <h2 class="text-lg font-black text-slate-800">Acesso Restrito ao Cadastro</h2>
+          <p class="text-xs text-slate-500 leading-relaxed">
+            Seu perfil de login está categorizado como <span class="font-bold text-rose-600">Atendente</span> na coluna D da planilha. O gerenciamento e cadastro de clientes é exclusivo para perfis com permissão de acesso <span class="font-bold text-emerald-700">Geral</span>.
+          </p>
+          <button type="button" onclick="switchPage('sac')" class="px-5 py-2.5 rounded-xl bg-sky-600 hover:bg-sky-700 text-white font-bold text-xs shadow-md transition cursor-pointer">
+            Voltar para Lançamento SAC
+          </button>
+        </div>
+
+        <div id="containerAcessoClientes" class="space-y-6">
+          <div id="alertCliEditMode" class="hidden p-4 rounded-2xl bg-amber-50 border border-amber-300 text-amber-900 flex justify-between items-center shadow-sm">
+            <div class="flex items-center gap-3">
+              <div class="p-2 bg-amber-500 text-white rounded-xl"><i data-lucide="edit-3" class="w-5 h-5"></i></div>
+              <div>
+                <p class="text-sm font-bold">Modo de Edição de Cliente: <span id="labelCliEditNome" class="font-bold text-amber-800">Cliente</span></p>
+                <p class="text-xs text-amber-700">Você está alterando os dados cadastrais deste ponto. Ao salvar, os dados serão atualizados na aba Clientes.</p>
+              </div>
+            </div>
+            <button type="button" onclick="cancelarEdicaoCliente()" class="px-3 py-1.5 bg-amber-200 hover:bg-amber-300 rounded-xl text-xs font-bold text-amber-900 transition cursor-pointer">
+              Cancelar Edição ✕
+            </button>
+          </div>
+
+          <div id="alertCliSuccess" class="hidden p-5 rounded-2xl bg-emerald-50 border border-emerald-200 text-emerald-900 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 shadow-sm transition">
+            <div class="flex items-center gap-3">
+              <div id="alertCliIconBadge" class="p-2 bg-emerald-600 text-white rounded-xl">
+                <i id="alertCliLucideIcon" data-lucide="check-circle" class="w-5 h-5"></i>
+              </div>
+              <div>
+                <p id="alertCliSuccessTitle" class="text-sm font-bold">Ação realizada com sucesso!</p>
+                <p id="alertCliSuccessSub" class="text-xs text-emerald-700">A aba Clientes foi atualizada com sucesso.</p>
+              </div>
+            </div>
+            <button type="button" onclick="document.getElementById('alertCliSuccess').classList.add('hidden')" class="px-3 py-2 rounded-xl hover:bg-emerald-100 text-xs font-semibold text-emerald-800 transition cursor-pointer">
+              Fechar
+            </button>
+          </div>
+
+          <section class="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between pb-4 mb-6 border-b border-slate-100 gap-4">
+              <div class="flex items-center gap-3">
+                <div class="p-2.5 bg-sky-600 text-white rounded-xl shadow-lg shadow-sky-500/25">
+                  <i data-lucide="building-2" class="w-6 h-6"></i>
+                </div>
+                <div>
+                  <h2 id="cliFormTitleText" class="text-base font-bold text-slate-900">Cadastro de Clientes e Pontos de Atendimento</h2>
+                  <p class="text-xs text-slate-500">Gerenciamento de máquinas, locais e filiais responsáveis · Aba: Clientes</p>
+                </div>
+              </div>
+              <div class="flex items-center gap-2">
+                <span class="text-xs px-3 py-1 rounded-lg bg-sky-50 text-sky-800 font-semibold border border-sky-200 flex items-center gap-1.5">
+                  <i data-lucide="sheet" class="w-3.5 h-3.5 text-sky-600"></i> Aba "Clientes"
+                </span>
+              </div>
+            </div>
+
+            <form id="clienteForm" onsubmit="handleClienteSubmit(event)" class="space-y-6">
+              <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 p-5 rounded-2xl bg-slate-50/90 border border-slate-200">
+                <div>
+                  <label class="block text-xs font-bold text-slate-700 mb-1">Cliente *</label>
+                  <input type="text" id="cadCliCliente" placeholder="Ex: Embraer, Coca Cola..." required onblur="formatarNomeProprio(this)" class="w-full text-sm font-semibold rounded-xl border border-slate-300 bg-white px-3.5 py-2 text-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-500">
+                </div>
+                <div>
+                  <label class="block text-xs font-bold text-slate-700 mb-1">Local *</label>
+                  <input type="text" id="cadCliLocal" placeholder="Ex: Fábrica 1, Administrativo..." required onblur="formatarNomeProprio(this)" class="w-full text-sm rounded-xl border border-slate-300 bg-white px-3.5 py-2 text-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-500">
+                </div>
+                <div>
+                  <label class="block text-xs font-bold text-slate-700 mb-1">Local interno *</label>
+                  <input type="text" id="cadCliLocalInterno" placeholder="Ex: Refeitório, Recepção, Bloco B..." required onblur="formatarNomeProprio(this)" class="w-full text-sm rounded-xl border border-slate-300 bg-white px-3.5 py-2 text-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-500">
+                </div>
+                <div>
+                  <label class="block text-xs font-bold text-slate-700 mb-1">Máquina *</label>
+                  <input type="text" id="cadCliMaquina" placeholder="Ex: Máquina 01, M05..." required onblur="formatarNomeProprio(this)" class="w-full text-sm rounded-xl border border-slate-300 bg-white px-3.5 py-2 text-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-500">
+                </div>
+                <div>
+                  <label class="block text-xs font-bold text-slate-700 mb-1">Modelo de máquina *</label>
+                  <input type="text" id="cadCliModeloMaquina" placeholder="Ex: Lei Saeco, Krea, Snaky..." required onblur="formatarNomeProprio(this)" class="w-full text-sm rounded-xl border border-slate-300 bg-white px-3.5 py-2 text-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-500">
+                </div>
+                <div>
+                  <label class="block text-xs font-bold text-slate-700 mb-1">Filial Responsável *</label>
+                  <input list="listaSACCidades" id="cadCliFilial" placeholder="Ex: Ribeirão Preto, São Carlos..." required onblur="formatarNomeProprio(this)" class="w-full text-sm rounded-xl border border-slate-300 bg-white px-3.5 py-2 text-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-500">
+                </div>
+              </div>
+
+              <div class="flex items-center justify-end gap-3 pt-4 border-t border-slate-100">
+                <button type="button" onclick="limparFormCliente()" class="px-5 py-2.5 rounded-xl border border-slate-300 bg-white text-xs font-semibold text-slate-600 hover:bg-slate-50 transition cursor-pointer">
+                  Limpar Campos
+                </button>
+                <button type="submit" id="btnSalvarCliente" class="flex items-center gap-2 px-6 py-2.5 rounded-xl bg-sky-600 text-white text-xs font-bold shadow-lg shadow-sky-500/25 hover:bg-sky-700 transition cursor-pointer">
+                  <i data-lucide="save" class="w-4 h-4"></i>
+                  <span id="btnSalvarClienteText">Cadastrar Cliente</span>
+                </button>
+              </div>
+            </form>
+          </section>
+
+          <!-- LISTA DE CLIENTES CADASTRADOS -->
+          <section class="bg-white p-4 sm:p-5 rounded-2xl border border-slate-200 shadow-sm space-y-4 overflow-hidden">
+            <div class="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-3 border-b border-slate-100">
+              <div>
+                <h2 class="text-base font-bold flex items-center gap-2 text-slate-800">
+                  <i data-lucide="users" class="w-4 h-4 text-sky-600"></i>
+                  Clientes Cadastrados
+                </h2>
+                <p class="text-xs text-slate-500">Base oficial de pontos sincronizada com a aba "Clientes"</p>
+              </div>
+              <div class="flex items-center gap-3">
+                <div class="relative">
+                  <i data-lucide="search" class="w-4 h-4 text-slate-400 absolute left-3 top-2.5"></i>
+                  <input type="text" id="searchClientesCadastrados" placeholder="Buscar cliente, local, máquina, filial..." oninput="filtrarClientesCadastrados()" class="text-xs pl-9 pr-3 py-2 rounded-xl border border-slate-300 bg-slate-50 text-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-500 w-64">
+                </div>
+                <span id="badgeContadorClientes" class="text-xs px-2.5 py-1 rounded-lg bg-sky-50 text-sky-700 font-bold border border-sky-200">
+                  0 cliente(s)
+                </span>
+              </div>
+            </div>
+
+            <div class="w-full overflow-hidden">
+              <table class="table-fixed-layout text-slate-600">
+                <thead class="bg-slate-50 uppercase font-bold text-slate-500 text-[10px]">
+                  <tr>
+                    <th style="width: 7%;" class="rounded-l-lg text-center">Ações</th>
+                    <th style="width: 22%;">Cliente</th>
+                    <th style="width: 17%;">Local</th>
+                    <th style="width: 18%;">Local interno</th>
+                    <th style="width: 12%;">Máquina</th>
+                    <th style="width: 12%;">Modelo</th>
+                    <th style="width: 12%;" class="rounded-r-lg">Filial</th>
+                  </tr>
+                </thead>
+                <tbody id="tableClientesBody" class="divide-y divide-slate-100">
+                  <tr>
+                    <td colspan="7" class="text-center py-6 text-slate-400 font-semibold">Nenhum cliente carregado.</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+      </div>
+
+    </main>
+  </div>
+
+  <script>
+    lucide.createIcons();
+    Chart.register(ChartDataLabels);
+
+    const APPS_SCRIPT_SAC_URL = "{APPS_SCRIPT_SAC_WEBAPP_URL}";
+    const dadosSAC = {dados_sac_json};
+    let listaChamadosSAC = Array.isArray(dadosSAC.chamados) ? dadosSAC.chamados : [];
+    let listaCadastroClientes = Array.isArray(dadosSAC.cadastro_clientes) ? dadosSAC.cadastro_clientes : [];
+    let chamadoEmEdicao = null;
+    let clienteEmEdicao = null;
+    let origemEdicaoSAC = 'sac';
+    
+    let atendenteSACLogado = "";
+    let loginUsuarioConectado = "";
+    let nivelAcessoLogado = "";
+
+    try {{
+      atendenteSACLogado = sessionStorage.getItem('sac_atendente_conectado') || "";
+      loginUsuarioConectado = sessionStorage.getItem('sac_usuario_login') || "";
+      nivelAcessoLogado = sessionStorage.getItem('sac_nivel_acesso') || "";
+    }} catch(e) {{}}
+
+    // CONVERSORES DE DATAS ENTRE ISO (YYYY-MM-DD) E PT-BR (DD/MM/AAAA)
+    function dataIsoParaPtBr(isoStr) {{
+      if (!isoStr) return '';
+      const s = String(isoStr).trim();
+      if (/^\\d{{4}}-\\d{{2}}-\\d{{2}}/.test(s)) {{
+        const [a, m, d] = s.substring(0, 10).split('-');
+        return `${{d}}/${{m}}/${{a}}`;
+      }}
+      return s;
+    }}
+
+    function dataPtBrParaIso(ptBrStr) {{
+      if (!ptBrStr) return '';
+      const s = String(ptBrStr).trim();
+      const parts = s.split(/[/ -]/);
+      if (parts.length === 3) {{
+        if (parts[2].length === 4) {{
+          return `${{parts[2]}}-${{parts[1].padStart(2, '0')}}-${{parts[0].padStart(2, '0')}}`;
+        }}
+        if (parts[0].length === 4) {{
+          return `${{parts[0]}}-${{parts[1].padStart(2, '0')}}-${{parts[2].padStart(2, '0')}}`;
+        }}
+      }}
+      return '';
+    }}
+
+    // PARSER RIGOROSO DE VALORES NUMÉRICOS (COLUNA J)
+    function parseValorNumerico(v) {{
+      if (v === null || v === undefined) return 0;
+      let s = String(v).trim().replace('R$', '').replace(/\\s+/g, '');
+      if (!s) return 0;
+      if (s.includes(',') && s.includes('.')) {{
+        if (s.lastIndexOf(',') > s.lastIndexOf('.')) {{
+          s = s.replace(/\\./g, '').replace(',', '.');
+        }} else {{
+          s = s.replace(/,/g, '');
+        }}
+      }} else if (s.includes(',')) {{
+        s = s.replace(',', '.');
+      }}
+      const n = parseFloat(s);
+      return isNaN(n) ? 0 : n;
+    }}
+
+    function formatCurrency(val) {{
+      return (val || 0).toLocaleString('pt-BR', {{ style: 'currency', currency: 'BRL' }});
+    }}
+
+    // CONTROLE DE AUTENTICAÇÃO
+    function verificarEstadoAutenticacao() {{
+      const loginScreen = document.getElementById('systemLoginScreen');
+      const appContainer = document.getElementById('systemAppContainer');
+
+      if (!atendenteSACLogado) {{
+        loginScreen.classList.remove('hidden');
+        appContainer.classList.add('hidden');
+      }} else {{
+        loginScreen.classList.add('hidden');
+        appContainer.classList.remove('hidden');
+
+        document.getElementById('labelHeaderAtendente').innerText = atendenteSACLogado;
+        document.getElementById('labelSACAtendenteLogado').innerText = atendenteSACLogado;
+        document.getElementById('sacAtendente').value = atendenteSACLogado;
+
+        aplicarRegrasDeAcesso();
+        inicializarFormularioSAC();
+        renderizarTabelaChamadosSAC();
+        renderizarTabelaChamadosAbertos();
+
+        let abaDesejada = 'dashboardSAC';
+        try {{
+          abaDesejada = sessionStorage.getItem('aba_ativa_atual') || 'dashboardSAC';
+        }} catch(e) {{}}
+
+        if (abaDesejada === 'cadastroClientes' && (nivelAcessoLogado || '').toLowerCase() !== 'geral') {{
+          abaDesejada = 'sac';
+        }}
+
+        switchPage(abaDesejada);
+      }}
+      lucide.createIcons();
+    }}
+
+    function realizarLoginGlobal(e) {{
+      e.preventDefault();
+      const u = (document.getElementById('globalLoginUser').value || '').trim().toLowerCase();
+      const p = (document.getElementById('globalLoginPass').value || '').trim().toLowerCase();
+      const erroBox = document.getElementById('globalLoginErro');
+
+      const userValido = dadosSAC.usuarios.find(x => 
+        String(x.usuario || '').trim().toLowerCase() === u && 
+        String(x.senha || '').trim().toLowerCase() === p
+      );
+
+      if (userValido) {{
+        erroBox.classList.add('hidden');
+        atendenteSACLogado = userValido.nome || userValido.usuario;
+        loginUsuarioConectado = userValido.usuario;
+        nivelAcessoLogado = userValido.acesso || "Atendente";
+
+        try {{
+          sessionStorage.setItem('sac_atendente_conectado', atendenteSACLogado);
+          sessionStorage.setItem('sac_usuario_login', loginUsuarioConectado);
+          sessionStorage.setItem('sac_nivel_acesso', nivelAcessoLogado);
+          sessionStorage.setItem('aba_ativa_atual', 'dashboardSAC');
+        }} catch(e) {{}}
+
+        verificarEstadoAutenticacao();
+      }} else {{
+        erroBox.classList.remove('hidden');
+      }}
+    }}
+
+    function realizarLogoutGlobal() {{
+      atendenteSACLogado = "";
+      loginUsuarioConectado = "";
+      nivelAcessoLogado = "";
+      try {{
+        sessionStorage.removeItem('sac_atendente_conectado');
+        sessionStorage.removeItem('sac_usuario_login');
+        sessionStorage.removeItem('sac_nivel_acesso');
+        sessionStorage.removeItem('aba_ativa_atual');
+      }} catch(e) {{}}
+      document.getElementById('globalLoginForm').reset();
+      verificarEstadoAutenticacao();
+    }}
+
+    function aplicarRegrasDeAcesso() {{
+      const btnCadastro = document.getElementById('navCadastroClientes');
+      const badgeAcesso = document.getElementById('badgeNivelAcesso');
+      const badgeHeader = document.getElementById('badgeHeaderNivelAcesso');
+      const containerCli = document.getElementById('containerAcessoClientes');
+      const bloqueioCli = document.getElementById('bloqueioAcessoClientes');
+
+      const ehGeral = (nivelAcessoLogado || '').trim().toLowerCase() === 'geral';
+
+      if (ehGeral) {{
+        if (btnCadastro) btnCadastro.classList.remove('hidden');
+        if (containerCli) containerCli.classList.remove('hidden');
+        if (bloqueioCli) bloqueioCli.classList.add('hidden');
+        if (badgeAcesso) {{
+          badgeAcesso.innerText = "Geral";
+          badgeAcesso.className = "text-[10px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200";
+        }}
+        if (badgeHeader) {{
+          badgeHeader.innerText = "Geral";
+          badgeHeader.className = "text-[10px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200 inline-block";
+        }}
+      }} else {{
+        if (btnCadastro) btnCadastro.classList.add('hidden');
+        if (containerCli) containerCli.classList.add('hidden');
+        if (bloqueioCli) bloqueioCli.classList.remove('hidden');
+        if (badgeAcesso) {{
+          badgeAcesso.innerText = "Atendente";
+          badgeAcesso.className = "text-[10px] font-bold text-slate-600 bg-slate-100 px-2 py-0.5 rounded border border-slate-200";
+        }}
+        if (badgeHeader) {{
+          badgeHeader.innerText = "Atendente";
+          badgeHeader.className = "text-[10px] font-bold text-slate-600 bg-slate-100 px-2 py-0.5 rounded border border-slate-200 inline-block";
+        }}
+      }}
+    }}
+
+    function converterParaPrimeirasMaiusculas(texto) {{
+      if (!texto) return '';
+      const preposicoes = ['de', 'da', 'do', 'das', 'dos', 'e'];
+      return texto
+        .toString()
+        .trim()
+        .toLowerCase()
+        .split(/\\s+/)
+        .map((palavra, index) => {{
+          if (index > 0 && preposicoes.includes(palavra)) {{
+            return palavra;
+          }}
+          return palavra.charAt(0).toUpperCase() + palavra.slice(1);
+        }})
+        .join(' ');
+    }}
+
+    function formatarNomeProprio(input) {{
+      if (!input || !input.value) return;
+      input.value = converterParaPrimeirasMaiusculas(input.value);
+    }}
+
+    function obterValoresDeDatalist(datalistId) {{
+      const dl = document.getElementById(datalistId);
+      if (!dl) return [];
+      return Array.from(dl.options).map(opt => (opt.value || '').trim());
+    }}
+
+    function validarInputComLista(inputId, datalistId, nomeAmigavel, dispararCascataCliente = false) {{
+      const input = document.getElementById(inputId);
+      if (!input) return false;
+      const valor = (input.value || '').trim();
+      if (!valor) return true;
+
+      const opcoesValidas = obterValoresDeDatalist(datalistId);
+      const achado = opcoesValidas.find(item => item.toLowerCase() === valor.toLowerCase());
+
+      if (!achado) {{
+        alert('⛔ Bloqueio de Segurança:\\nO valor digitado no campo "' + nomeAmigavel + '" não está cadastrado na base de dados.\\nPor favor, selecione exclusivamente um dos itens disponíveis na listagem.');
+        input.value = '';
+        if (dispararCascataCliente) {{
+          document.getElementById('sacLocalInterno').innerHTML = '<option value="">Selecione primeiro o Cliente...</option>';
+          document.getElementById('sacCidade').value = '';
+        }}
+        setTimeout(() => {{ input.focus(); }}, 50);
+        return false;
+      }} else {{
+        input.value = achado;
+        if (dispararCascataCliente) {{
+          aoMudarClienteSAC();
+        }}
+        return true;
+      }}
+    }}
+
+    function abrirModalLoading(titulo, subtitulo, tipoAcao = 'loading') {{
+      const modal = document.getElementById('modalLoadingAcao');
+      if (!modal) return;
+      document.getElementById('modalLoadingTitle').innerText = titulo;
+      document.getElementById('modalLoadingSub').innerText = subtitulo;
+      const spinner = document.getElementById('modalSpinner');
+      const iconCheck = document.getElementById('modalIconCheck');
+      const iconTrash = document.getElementById('modalIconTrash');
+      const progressBar = document.getElementById('modalProgressBar');
+      const badge = document.getElementById('modalIconContainer');
+
+      spinner.classList.add('hidden');
+      iconCheck.classList.add('hidden');
+      iconTrash.classList.add('hidden');
+      progressBar.classList.remove('hidden');
+
+      if (tipoAcao === 'loading') {{
+        spinner.classList.remove('hidden');
+        badge.className = "w-16 h-16 rounded-2xl bg-sky-50 text-sky-600 flex items-center justify-center shadow-inner";
+      }} else if (tipoAcao === 'sucesso') {{
+        iconCheck.classList.remove('hidden');
+        progressBar.classList.add('hidden');
+        badge.className = "w-16 h-16 rounded-2xl bg-emerald-50 text-emerald-600 flex items-center justify-center shadow-inner";
+      }} else if (tipoAcao === 'excluir') {{
+        iconTrash.classList.remove('hidden');
+        progressBar.classList.add('hidden');
+        badge.className = "w-16 h-16 rounded-2xl bg-rose-50 text-rose-600 flex items-center justify-center shadow-inner";
+      }}
+      modal.classList.remove('hidden');
+      lucide.createIcons();
+    }}
+
+    function fecharModalLoading() {{
+      const modal = document.getElementById('modalLoadingAcao');
+      if (modal) modal.classList.add('hidden');
+    }}
+
+    function exibirMensagemTopo(titulo, subtitulo, tipo = 'sucesso') {{
+      const alertBox = document.getElementById('alertSACSuccess');
+      const alertTitle = document.getElementById('alertSACSuccessTitle');
+      const alertSub = document.getElementById('alertSACSuccessSub');
+      const iconBadge = document.getElementById('alertSACIconBadge');
+      const lucideIcon = document.getElementById('alertSACLucideIcon');
+      if (!alertBox) return;
+
+      alertTitle.innerText = titulo;
+      alertSub.innerText = subtitulo;
+      if (tipo === 'excluir') {{
+        alertBox.className = "p-5 rounded-2xl bg-rose-50 border border-rose-200 text-rose-900 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 shadow-sm transition";
+        iconBadge.className = "p-2 bg-rose-600 text-white rounded-xl";
+        lucideIcon.setAttribute('data-lucide', 'trash-2');
+      }} else if (tipo === 'editar') {{
+        alertBox.className = "p-5 rounded-2xl bg-amber-50 border border-amber-300 text-amber-900 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 shadow-sm transition";
+        iconBadge.className = "p-2 bg-amber-600 text-white rounded-xl";
+        lucideIcon.setAttribute('data-lucide', 'edit-3');
+      }} else {{
+        alertBox.className = "p-5 rounded-2xl bg-emerald-50 border border-emerald-200 text-emerald-900 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 shadow-sm transition";
+        iconBadge.className = "p-2 bg-emerald-600 text-white rounded-xl";
+        lucideIcon.setAttribute('data-lucide', 'check-circle');
+      }}
+      alertBox.classList.remove('hidden');
+      alertBox.scrollIntoView({{ behavior: 'smooth', block: 'center' }});
+      lucide.createIcons();
+    }}
+
+    function enviarParaPlanilhaGarantido(payload) {{
+      const endpoint = APPS_SCRIPT_SAC_URL;
+      const strData = JSON.stringify(payload);
+      if (navigator.sendBeacon) {{
+        try {{
+          const blob = new Blob([strData], {{ type: 'text/plain;charset=utf-8' }});
+          navigator.sendBeacon(endpoint, blob);
+          return Promise.resolve(true);
+        }} catch (err) {{}}
+      }}
+      try {{
+        fetch(endpoint, {{
+          method: "POST",
+          mode: "no-cors",
+          headers: {{ "Content-Type": "text/plain;charset=utf-8" }},
+          body: strData
+        }}).catch(() => {{}});
+      }} catch (err) {{}}
+      return Promise.resolve(true);
+    }}
+
+    function executarRefresh() {{
+      window.parent.location.reload();
+    }}
+
+    function switchPage(page) {{
+      if (page === 'cadastroClientes' && (nivelAcessoLogado || '').trim().toLowerCase() !== 'geral') {{
+        alert('⛔ Acesso Restrito:\\nSeu perfil não tem permissão para cadastrar ou gerenciar clientes.');
+        switchPage('sac');
+        return;
+      }}
+      try {{ sessionStorage.setItem('aba_ativa_atual', page); }} catch(e) {{}}
+
+      const pages = {{
+        dashboardSAC: document.getElementById('pageDashboardSAC'),
+        sac: document.getElementById('pageSAC'),
+        chamadosAbertos: document.getElementById('pageChamadosAbertos'),
+        cadastroClientes: document.getElementById('pageCadastroClientes')
+      }};
+      const buttons = {{
+        dashboardSAC: document.getElementById('navDashboardSAC'),
+        sac: document.getElementById('navSAC'),
+        chamadosAbertos: document.getElementById('navChamadosAbertos'),
+        cadastroClientes: document.getElementById('navCadastroClientes')
+      }};
+
+      Object.keys(pages).forEach(key => {{
+        if (pages[key]) pages[key].classList.add('hidden');
+        if (buttons[key]) {{
+          buttons[key].classList.remove('active');
+          buttons[key].classList.add('inactive');
+        }}
+      }});
+
+      if (pages[page]) {{
+        pages[page].classList.remove('hidden');
+      }}
+      if (buttons[page]) {{
+        buttons[page].classList.add('active');
+        buttons[page].classList.remove('inactive');
+      }}
+
+      if (page === 'dashboardSAC') {{
+        atualizarDashboardSAC();
+      }} else if (page === 'chamadosAbertos') {{
+        renderizarTabelaChamadosAbertos();
+      }} else if (page === 'sac') {{
+        renderizarTabelaChamadosSAC();
+      }} else if (page === 'cadastroClientes') {{
+        aplicarRegrasDeAcesso();
+        renderizarTabelaClientes();
+      }}
+      lucide.createIcons();
+    }}
+
+    // =========================================================================
+    // INICIALIZAÇÃO & FORMULÁRIO SAC
+    // =========================================================================
+    function calcularPreviaProximoChamado(ano) {{
+      let maior = dadosSAC.maior_sac_ano[ano] || 0;
+      listaChamadosSAC.forEach(c => {{
+        if (c.chamado) {{
+          const m = c.chamado.match(new RegExp('SAC-' + ano + '-(\\\\d+)', 'i'));
+          if (m) {{
+            const seq = parseInt(m[1], 10);
+            if (seq > maior) maior = seq;
+          }}
+        }}
+      }});
+      return 'SAC-' + ano + '-' + String(maior + 1).padStart(4, '0');
+    }}
+
+    function inicializarFormularioSAC() {{
+      if (chamadoEmEdicao) return;
+      const anoAtual = new Date().getFullYear();
+      document.getElementById('sacChamado').value = calcularPreviaProximoChamado(anoAtual);
+      document.getElementById('sacData').value = new Date().toISOString().split('T')[0];
+      document.getElementById('sacProduto').value = "";
+      document.getElementById('sacDataTransacao').value = "";
+      document.getElementById('sacHoraTransacao').value = "";
+      document.getElementById('sacReembolso').value = "";
+      document.getElementById('sacPix').value = "";
+      document.getElementById('sacReembolsoRealizado').value = "Não";
+      document.getElementById('sacValor').value = "";
+      document.getElementById('sacNome').value = "";
+      document.getElementById('sacCelular').value = "";
+      document.getElementById('sacProblema').value = "";
+      document.getElementById('sacDescricao').value = "";
+      document.getElementById('sacFormaPgto').value = "";
+      document.getElementById('sacCliente').value = "";
+      document.getElementById('sacCidade').value = "";
+      document.getElementById('sacObservacao').value = "";
+      document.getElementById('sacLocalInterno').innerHTML = '<option value="">Selecione primeiro o Cliente...</option>';
+
+      const dlCli = document.getElementById('listaSACClientes');
+      dlCli.innerHTML = '';
+      [...new Set(dadosSAC.clientes.map(c => c.cliente).filter(Boolean))].sort().forEach(cli => {{
+        const opt = document.createElement('option'); opt.value = cli; dlCli.appendChild(opt);
+      }});
+
+      const dlCid = document.getElementById('listaSACCidades');
+      dlCid.innerHTML = '';
+      (dadosSAC.cidades?.length ? dadosSAC.cidades : [...new Set(dadosSAC.clientes.map(c => c.cidade).filter(Boolean))]).sort().forEach(cid => {{
+        const opt = document.createElement('option'); opt.value = cid; dlCid.appendChild(opt);
+      }});
+
+      const dlDesc = document.getElementById('listaSACDescricoes');
+      dlDesc.innerHTML = '';
+      dadosSAC.descricoes.forEach(d => {{ const opt = document.createElement('option'); opt.value = d; dlDesc.appendChild(opt); }});
+
+      const dlProb = document.getElementById('listaSACProblemas');
+      dlProb.innerHTML = '';
+      dadosSAC.problemas.forEach(p => {{ const opt = document.createElement('option'); opt.value = p; dlProb.appendChild(opt); }});
+
+      const dlPgto = document.getElementById('listaSACFormasPgto');
+      dlPgto.innerHTML = '';
+      dadosSAC.formas_pagamento.forEach(f => {{ const opt = document.createElement('option'); opt.value = f; dlPgto.appendChild(opt); }});
+    }}
+
+    function aoMudarClienteSAC() {{
+      const cli = (document.getElementById('sacCliente').value || '').trim();
+      const selectLocal = document.getElementById('sacLocalInterno');
+      selectLocal.innerHTML = '<option value="">Selecione o Local Interno...</option>';
+      if (!cli) return;
+
+      const locaisDoCliente = dadosSAC.clientes.filter(c => c.cliente.toLowerCase() === cli.toLowerCase());
+      if (!locaisDoCliente.length) return;
+
+      const locaisUnicos = [...new Set(locaisDoCliente.map(l => l.local).filter(Boolean))].sort();
+      locaisUnicos.forEach(loc => {{
+        const opt = document.createElement('option');
+        opt.value = loc; opt.textContent = loc;
+        selectLocal.appendChild(opt);
+      }});
+      if (locaisUnicos.length === 1) {{
+        selectLocal.value = locaisUnicos[0];
+        aoMudarLocalInternoSAC();
+      }}
+    }}
+
+    function aoMudarLocalInternoSAC() {{
+      const cli = (document.getElementById('sacCliente').value || '').trim();
+      const loc = document.getElementById('sacLocalInterno').value;
+      if (!cli || !loc) return;
+      const achado = dadosSAC.clientes.find(c => c.cliente.toLowerCase() === cli.toLowerCase() && c.local === loc);
+      if (achado && achado.cidade) document.getElementById('sacCidade').value = achado.cidade;
+    }}
+
+    function limparFormSAC() {{
+      chamadoEmEdicao = null;
+      document.getElementById('sacForm').reset();
+      document.getElementById('sacProduto').value = "";
+      document.getElementById('sacLocalInterno').innerHTML = '<option value="">Selecione primeiro o Cliente...</option>';
+      document.getElementById('sacCidade').value = "";
+      document.getElementById('sacDataTransacao').value = "";
+      document.getElementById('sacHoraTransacao').value = "";
+      document.getElementById('sacReembolso').value = "";
+      document.getElementById('sacPix').value = "";
+      document.getElementById('sacReembolsoRealizado').value = "Não";
+      document.getElementById('sacValor').value = "";
+      document.getElementById('sacNome').value = "";
+      document.getElementById('sacCelular').value = "";
+      document.getElementById('sacProblema').value = "";
+      document.getElementById('sacDescricao').value = "";
+      document.getElementById('sacFormaPgto').value = "";
+      document.getElementById('sacCliente').value = "";
+      document.getElementById('sacObservacao').value = "";
+
+      document.getElementById('alertSACEditMode').classList.add('hidden');
+      document.getElementById('sacFormTitleText').innerText = "Lançamento de Ocorrências do SAC";
+      document.getElementById('btnSalvarSACText').innerText = "Lançar Ocorrência SAC";
+      
+      const anoAtual = new Date().getFullYear();
+      document.getElementById('sacChamado').value = calcularPreviaProximoChamado(anoAtual);
+      document.getElementById('sacData').value = new Date().toISOString().split('T')[0];
+      document.getElementById('sacAtendente').value = atendenteSACLogado;
+      document.getElementById('sacDataHoraAuto').value = "Automático no Envio";
+      lucide.createIcons();
+    }}
+
+    function editarChamadoSAC(numeroChamado, origem = 'sac') {{
+      const item = listaChamadosSAC.find(c => c.chamado === numeroChamado);
+      if (!item) return;
+
+      origemEdicaoSAC = origem;
+      switchPage('sac');
+      chamadoEmEdicao = item;
+      document.getElementById('sacChamado').value = item.chamado;
+      document.getElementById('sacData').value = dataPtBrParaIso(item.data);
+      document.getElementById('sacCliente').value = item.cliente;
+      aoMudarClienteSAC();
+      document.getElementById('sacLocalInterno').value = item.localInterno;
+      document.getElementById('sacCidade').value = item.cidade;
+      document.getElementById('sacDescricao').value = item.descricao;
+      document.getElementById('sacProduto').value = item.produto || '';
+      document.getElementById('sacDataTransacao').value = dataPtBrParaIso(item.dataTransacao) || '';
+      document.getElementById('sacHoraTransacao').value = item.horaTransacao || '';
+      document.getElementById('sacValor').value = parseValorNumerico(item.valor) || '';
+      document.getElementById('sacNome').value = item.nomeSobrenome;
+      document.getElementById('sacCelular').value = item.celular;
+      document.getElementById('sacProblema').value = item.problemas;
+      document.getElementById('sacFormaPgto').value = item.formaPgto || '';
+
+      const rmbVal = (item.reembolso || '').trim().toLowerCase();
+      if (rmbVal.includes('remoto') || rmbVal.includes('crédito') || rmbVal.includes('credito')) {{
+        document.getElementById('sacReembolso').value = 'Crédito Remoto';
+      }} else if (rmbVal.includes('pendente')) {{
+        document.getElementById('sacReembolso').value = 'Pendente';
+      }} else if (rmbVal.includes('stone') || rmbVal.includes('devolução') || rmbVal.includes('devolucao')) {{
+        document.getElementById('sacReembolso').value = 'Devolução Stone';
+      }} else {{
+        document.getElementById('sacReembolso').value = '';
+      }}
+
+      document.getElementById('sacPix').value = item.pix || '';
+      document.getElementById('sacObservacao').value = item.observacao || '';
+      var rReal = (item.reembolsoRealizado || 'Não').trim().toLowerCase();
+      document.getElementById('sacReembolsoRealizado').value = (rReal === 'sim' || rReal === 's' || rReal === 'true') ? 'Sim' : 'Não';
+      document.getElementById('sacAtendente').value = item.atendente || atendenteSACLogado;
+      document.getElementById('sacDataHoraAuto').value = item.dataHoraLancamento || 'Original Preservado';
+
+      document.getElementById('alertSACEditMode').classList.remove('hidden');
+      document.getElementById('labelSACEditChamado').innerText = item.chamado;
+      document.getElementById('sacFormTitleText').innerText = 'Edição da Ocorrência: ' + item.chamado;
+      document.getElementById('btnSalvarSACText').innerText = 'Salvar Alterações';
+      document.getElementById('sacForm').scrollIntoView({{ behavior: 'smooth', block: 'start' }});
+      lucide.createIcons();
+    }}
+
+    function cancelarEdicaoSAC() {{
+      const origemAnterior = origemEdicaoSAC;
+      limparFormSAC();
+      if (origemAnterior === 'chamadosAbertos') switchPage('chamadosAbertos');
+      origemEdicaoSAC = 'sac';
+    }}
+
+    function excluirChamadoSAC(numeroChamado) {{
+      if (!confirm('Deseja realmente excluir o chamado ' + numeroChamado + '? Esta ação solicitará a remoção na planilha.')) return;
+      abrirModalLoading('Excluindo Ocorrência...', 'Removendo a ocorrência ' + numeroChamado + ' da planilha oficial Chamados.', 'loading');
+      const item = listaChamadosSAC.find(c => c.chamado === numeroChamado);
+
+      enviarParaPlanilhaGarantido({{
+        "action": "excluir", "acao": "excluir", "tipo": "excluir_sac",
+        "Chamado": numeroChamado, "chamado": numeroChamado,
+        "linha": item?.linha || ""
+      }});
+
+      listaChamadosSAC = listaChamadosSAC.filter(c => c.chamado !== numeroChamado);
+      renderizarTabelaChamadosSAC();
+      renderizarTabelaChamadosAbertos();
+      atualizarDashboardSAC();
+
+      if (chamadoEmEdicao && chamadoEmEdicao.chamado === numeroChamado) limparFormSAC();
+
+      setTimeout(() => {{
+        abrirModalLoading('Chamado Excluído!', 'A ocorrência ' + numeroChamado + ' foi removida da base com sucesso.', 'excluir');
+        exibirMensagemTopo('🗑️ Chamado ' + numeroChamado + ' excluído!', 'A ocorrência foi removida do sistema e da planilha oficial.', 'excluir');
+        setTimeout(fecharModalLoading, 1000);
+      }}, 500);
+    }}
+
+    function handleSACSubmit(e) {{
+      e.preventDefault();
+      if (!validarInputComLista('sacCliente', 'listaSACClientes', 'Cliente')) return;
+      const selectLocal = document.getElementById('sacLocalInterno');
+      if (!selectLocal.value) {{ alert('⛔ Selecione um Local Interno.'); selectLocal.focus(); return; }}
+      if (!validarInputComLista('sacCidade', 'listaSACCidades', 'Filial Responsável')) return;
+      if (!validarInputComLista('sacDescricao', 'listaSACDescricoes', 'Descrição')) return;
+      if (!validarInputComLista('sacProblema', 'listaSACProblemas', 'Problemas')) return;
+      if (!validarInputComLista('sacFormaPgto', 'listaSACFormasPgto', 'Forma de Pagamento')) return;
+      const selectProduto = document.getElementById('sacProduto');
+      if (!selectProduto.value) {{ alert('⛔ Selecione o Produto (Café ou Snaky).'); selectProduto.focus(); return; }}
+
+      const ehEdicao = (chamadoEmEdicao !== null);
+      let chamado = document.getElementById('sacChamado').value.trim();
+      const anoAtual = new Date().getFullYear();
+      if (!ehEdicao) chamado = calcularPreviaProximoChamado(anoAtual);
+
+      if (!ehEdicao && listaChamadosSAC.some(c => c.chamado.toUpperCase() === chamado.toUpperCase())) {{
+        alert('⛔ Chamado Duplicado! O número "' + chamado + '" já existe.');
+        document.getElementById('sacChamado').value = calcularPreviaProximoChamado(anoAtual);
+        return;
+      }}
+
+      abrirModalLoading(
+        ehEdicao ? 'Atualizando Ocorrência...' : 'Lançando no Sistema...',
+        ehEdicao ? 'Gravando alterações do chamado ' + chamado + ' na planilha.' : 'Registrando a ocorrência ' + chamado + ' na planilha oficial.',
+        'loading'
+      );
+
+      // Data dos chamados no padrão oficial PT-BR DD/MM/AAAA
+      const dataIso = document.getElementById('sacData').value;
+      const data = dataIsoParaPtBr(dataIso);
+
+      const cliente = document.getElementById('sacCliente').value.trim();
+      const localInterno = document.getElementById('sacLocalInterno').value;
+      const cidade = document.getElementById('sacCidade').value.trim();
+      const descricao = document.getElementById('sacDescricao').value.trim();
+      const produto = document.getElementById('sacProduto').value;
+      const dataTransacaoIso = document.getElementById('sacDataTransacao').value;
+      const dataTransacao = dataIsoParaPtBr(dataTransacaoIso);
+      const horaTransacao = document.getElementById('sacHoraTransacao').value;
+      const valor = parseFloat(document.getElementById('sacValor').value) || 0;
+      const nomeSobrenome = converterParaPrimeirasMaiusculas(document.getElementById('sacNome').value.trim());
+      const celular = document.getElementById('sacCelular').value.trim();
+      const problemas = document.getElementById('sacProblema').value.trim();
+      const formaPgto = document.getElementById('sacFormaPgto').value.trim();
+      const reembolso = (document.getElementById('sacReembolso').value || '').trim();
+      const pix = document.getElementById('sacPix').value.trim();
+      const reembolsoRealizado = document.getElementById('sacReembolsoRealizado').value || "Não";
+      const observacao = document.getElementById('sacObservacao').value.trim();
+
+      let atendente = ehEdicao && chamadoEmEdicao?.atendente ? chamadoEmEdicao.atendente : (atendenteSACLogado || document.getElementById('sacAtendente').value);
+      let dataHoraLancamento = ehEdicao && chamadoEmEdicao?.dataHoraLancamento ? chamadoEmEdicao.dataHoraLancamento : (new Date().toLocaleDateString('pt-BR') + ' ' + new Date().toLocaleTimeString('pt-BR'));
+      let financeiroResponsavel = (reembolsoRealizado === "Sim") ? (atendenteSACLogado || chamadoEmEdicao?.financeiroResponsavel || "") : (chamadoEmEdicao?.financeiroResponsavel || "");
+
+      const payloadSAC = {{
+        "acao": ehEdicao ? "editar" : "inserir", "action": ehEdicao ? "editar" : "inserir",
+        "linha": ehEdicao && chamadoEmEdicao.linha ? chamadoEmEdicao.linha : "",
+        "Chamado": chamado, "Data": data, "Cliente": cliente, "Local Interno": localInterno,
+        "Cidade": cidade, "Descrição": descricao, "Produto": produto,
+        "Data da Transação": dataTransacao, "Hora da Transação": horaTransacao,
+        "Valor": valor, "Nome/Sobrenome": nomeSobrenome, "Celular": celular,
+        "Problemas": problemas, "Forma de Pagamento": formaPgto, "Reembolso": reembolso,
+        "Pix - Reembolso": pix, "Atendente": atendente, "Data/Hora do lançamento": dataHoraLancamento,
+        "Reembolso Realizado": reembolsoRealizado, "Financeiro Responsavel": financeiroResponsavel,
+        "Observação": observacao, "coluna_u": observacao
+      }};
+
+      enviarParaPlanilhaGarantido(payloadSAC);
+
+      const novoItem = {{
+        linha: ehEdicao && chamadoEmEdicao.linha ? chamadoEmEdicao.linha : listaChamadosSAC.length + 2,
+        chamado, data, cliente, localInterno, cidade, descricao, produto,
+        dataTransacao, horaTransacao, valor: formatCurrency(valor),
+        nomeSobrenome, celular, problemas, formaPgto, reembolso, pix, atendente,
+        dataHoraLancamento, reembolsoRealizado, financeiroResponsavel, observacao
+      }};
+
+      if (ehEdicao) {{
+        listaChamadosSAC = listaChamadosSAC.map(c => c.chamado === chamado ? novoItem : c);
+      }} else {{
+        listaChamadosSAC.unshift(novoItem);
+      }}
+
+      const m = chamado.match(/SAC-(\d{{4}})-(\d+)/i);
+      if (m) dadosSAC.maior_sac_ano[m[1]] = Math.max(dadosSAC.maior_sac_ano[m[1]] || 0, parseInt(m[2], 10));
+
+      const destinoAposSalvar = (ehEdicao && origemEdicaoSAC === 'chamadosAbertos') ? 'chamadosAbertos' : 'sac';
+      limparFormSAC();
+      renderizarTabelaChamadosSAC();
+      renderizarTabelaChamadosAbertos();
+      atualizarDashboardSAC();
+      origemEdicaoSAC = 'sac';
+
+      setTimeout(() => {{
+        abrirModalLoading(ehEdicao ? 'Ocorrência Atualizada!' : 'Lançamento Concluído!', 'Ocorrência gravada com sucesso.', 'sucesso');
+        if (destinoAposSalvar === 'chamadosAbertos') switchPage('chamadosAbertos');
+        exibirMensagemTopo('✅ Ocorrência ' + chamado + ' registrada com sucesso!', 'Valor: ' + formatCurrency(valor) + ' · Forma Pgto: ' + (formaPgto || '-'));
+        setTimeout(fecharModalLoading, 1000);
+      }}, 500);
+    }}
+
+    // =========================================================================
+    // RENDERIZAÇÃO DAS TABELAS (COM FORMA DE PGTO)
+    // =========================================================================
+    function filtrarChamadosSAC() {{
+      const termo = (document.getElementById('searchSACChamados')?.value || '').trim().toLowerCase();
+      if (!termo) {{ renderizarTabelaChamadosSAC(listaChamadosSAC); return; }}
+      const filtrados = listaChamadosSAC.filter(c => 
+        Object.values(c).some(val => String(val || '').toLowerCase().includes(termo))
+      );
+      renderizarTabelaChamadosSAC(filtrados);
+    }}
+
+    function renderizarTabelaChamadosSAC(lista = listaChamadosSAC) {{
+      const tbody = document.getElementById('tableSACChamadosBody');
+      const badge = document.getElementById('badgeContadorSAC');
+      if (badge) badge.innerText = lista.length + ' chamado(s)';
+      if (!tbody) return;
+      if (!lista || lista.length === 0) {{
+        tbody.innerHTML = '<tr><td colspan="15" class="text-center py-6 text-slate-400 font-semibold">Nenhuma ocorrência encontrada.</td></tr>';
+        return;
+      }}
+      tbody.innerHTML = lista.map(c => {{
+        const rVal = (c.reembolsoRealizado || 'Não').toString().trim().toLowerCase();
+        const pago = (rVal === 'sim' || rVal === 's' || rVal === 'true');
+        const badgePago = pago 
+          ? '<span class="inline-flex items-center px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">Sim</span>'
+          : '<span class="inline-flex items-center px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-amber-100 text-amber-800 border border-amber-300">Não</span>';
+
+        return `
+          <tr class="hover:bg-slate-50 transition border-b border-slate-100">
+            <td class="text-center whitespace-nowrap">
+              <div class="inline-flex items-center gap-1 justify-center">
+                <button type="button" onclick="editarChamadoSAC('${{c.chamado}}', 'sac')" title="Editar chamado ${{c.chamado}}" class="p-1 rounded bg-sky-50 hover:bg-sky-100 text-sky-700 border border-sky-200 transition cursor-pointer">
+                  <i data-lucide="edit-2" class="w-3.5 h-3.5"></i>
+                </button>
+                <button type="button" onclick="excluirChamadoSAC('${{c.chamado}}')" title="Excluir chamado ${{c.chamado}}" class="p-1 rounded bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 transition cursor-pointer">
+                  <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
+                </button>
+              </div>
+            </td>
+            <td class="font-mono font-bold text-sky-700 truncate" title="${{c.chamado}}">${{c.chamado}}</td>
+            <td class="truncate" title="${{c.data || '-'}}">${{c.data || '-'}}</td>
+            <td class="font-semibold text-slate-800 truncate" title="${{c.cliente || ''}}">${{c.cliente || '-'}}</td>
+            <td class="text-slate-600 truncate" title="${{c.localInterno || ''}}">${{c.localInterno || '-'}}</td>
+            <td class="text-slate-600 truncate" title="${{c.cidade || ''}}">${{c.cidade || '-'}}</td>
+            <td class="font-medium text-slate-700 truncate" title="${{c.produto || '-'}}">${{c.produto || '-'}}</td>
+            <td class="text-right font-bold text-emerald-700 truncate" title="${{c.valor || ''}}">${{formatCurrency(parseValorNumerico(c.valor))}}</td>
+            <td class="font-medium text-slate-800 truncate" title="${{c.nomeSobrenome || ''}}">${{c.nomeSobrenome || '-'}}</td>
+            <td class="text-slate-700 font-medium truncate" title="${{c.formaPgto || ''}}">${{c.formaPgto || '-'}}</td>
+            <td class="text-sky-900 font-semibold truncate" title="${{c.reembolso || ''}}">${{c.reembolso || '-'}}</td>
+            <td class="text-center whitespace-nowrap">${{badgePago}}</td>
+            <td class="font-semibold text-emerald-800 truncate" title="${{c.financeiroResponsavel || ''}}">${{c.financeiroResponsavel || '-'}}</td>
+            <td class="text-slate-600 truncate" title="${{c.observacao || ''}}">${{c.observacao || '-'}}</td>
+            <td class="font-medium text-slate-600 truncate" title="${{c.atendente || ''}}">${{c.atendente || '-'}}</td>
+          </tr>
+        `;
+      }}).join('');
+      lucide.createIcons();
+    }}
+
+    function filtrarChamadosAbertos() {{
+      const termo = (document.getElementById('searchAbertos')?.value || '').trim().toLowerCase();
+      if (!termo) {{ renderizarTabelaChamadosAbertos(listaChamadosSAC); return; }}
+      const filtrados = listaChamadosSAC.filter(c => 
+        Object.values(c).some(val => String(val || '').toLowerCase().includes(termo))
+      );
+      renderizarTabelaChamadosAbertos(filtrados);
+    }}
+
+    function renderizarTabelaChamadosAbertos(lista = listaChamadosSAC) {{
+      const tbody = document.getElementById('tableChamadosAbertosBody');
+      const badge = document.getElementById('badgeContadorAbertos');
+      if (badge) badge.innerText = lista.length + ' chamado(s)';
+      if (!tbody) return;
+      if (!lista || lista.length === 0) {{
+        tbody.innerHTML = '<tr><td colspan="11" class="text-center py-6 text-slate-400 font-semibold">Nenhum chamado aberto encontrado.</td></tr>';
+        return;
+      }}
+      tbody.innerHTML = lista.map(c => {{
+        const rVal = (c.reembolsoRealizado || 'Não').toString().trim().toLowerCase();
+        const pago = (rVal === 'sim' || rVal === 's' || rVal === 'true');
+        const badgePago = pago 
+          ? '<span class="inline-flex items-center px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">Sim</span>'
+          : '<span class="inline-flex items-center px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-amber-100 text-amber-800 border border-amber-300">Não</span>';
+
+        return `
+          <tr class="hover:bg-slate-50 transition border-b border-slate-100">
+            <td class="font-mono font-bold text-sky-700 truncate" title="${{c.chamado}}">${{c.chamado}}</td>
+            <td class="text-slate-700 truncate" title="${{c.data || '-'}}">${{c.data || '-'}}</td>
+            <td class="font-semibold text-slate-800 truncate" title="${{c.cliente || ''}}">${{c.cliente || '-'}}</td>
+            <td class="text-right font-bold text-emerald-700 truncate" title="${{c.valor || ''}}">${{formatCurrency(parseValorNumerico(c.valor))}}</td>
+            <td class="font-medium text-slate-800 truncate" title="${{c.nomeSobrenome || ''}}">${{c.nomeSobrenome || '-'}}</td>
+            <td class="text-slate-700 font-semibold truncate" title="${{c.formaPgto || ''}}">${{c.formaPgto || '-'}}</td>
+            <td class="font-mono text-slate-600 truncate" title="${{c.pix || ''}}">${{c.pix || '-'}}</td>
+            <td class="text-center whitespace-nowrap">${{badgePago}}</td>
+            <td class="font-semibold text-emerald-800 truncate" title="${{c.financeiroResponsavel || ''}}">${{c.financeiroResponsavel || '-'}}</td>
+            <td class="text-slate-600 truncate" title="${{c.observacao || ''}}">${{c.observacao || '-'}}</td>
+            <td class="text-center whitespace-nowrap">
+              <button type="button" onclick="editarChamadoSAC('${{c.chamado}}', 'chamadosAbertos')" title="Editar chamado ${{c.chamado}}" class="p-1 rounded bg-sky-50 hover:bg-sky-100 text-sky-700 border border-sky-200 transition cursor-pointer inline-flex items-center justify-center">
+                <i data-lucide="edit-3" class="w-3.5 h-3.5"></i>
+              </button>
+            </td>
+          </tr>
+        `;
+      }}).join('');
+      lucide.createIcons();
+    }}
+
+    // =========================================================================
+    // CADASTRO DE CLIENTES
+    // =========================================================================
+    function limparFormCliente() {{
+      clienteEmEdicao = null;
+      document.getElementById('clienteForm').reset();
+      document.getElementById('alertCliEditMode').classList.add('hidden');
+      document.getElementById('cliFormTitleText').innerText = "Cadastro de Clientes e Pontos de Atendimento";
+      document.getElementById('btnSalvarClienteText').innerText = "Cadastrar Cliente";
+      lucide.createIcons();
+    }}
+
+    function cancelarEdicaoCliente() {{ limparFormCliente(); }}
+
+    function editarCliente(index) {{
+      if ((nivelAcessoLogado || '').trim().toLowerCase() !== 'geral') {{
+        alert('⛔ Operação não permitida: Apenas usuários com perfil Geral podem editar clientes.');
+        return;
+      }}
+      const item = listaCadastroClientes[index];
+      if (!item) return;
+
+      clienteEmEdicao = {{ ...item, indexOriginal: index }};
+      document.getElementById('cadCliCliente').value = converterParaPrimeirasMaiusculas(item.cliente || '');
+      document.getElementById('cadCliLocal').value = converterParaPrimeirasMaiusculas(item.local || '');
+      document.getElementById('cadCliLocalInterno').value = converterParaPrimeirasMaiusculas(item.localInterno || item.local || '');
+      document.getElementById('cadCliMaquina').value = converterParaPrimeirasMaiusculas(item.maquina || '');
+      document.getElementById('cadCliModeloMaquina').value = converterParaPrimeirasMaiusculas(item.modeloMaquina || '');
+      document.getElementById('cadCliFilial').value = converterParaPrimeirasMaiusculas(item.filialResponsavel || '');
+
+      document.getElementById('alertCliEditMode').classList.remove('hidden');
+      document.getElementById('labelCliEditNome').innerText = item.cliente + ' (' + (item.localInterno || item.local || '') + ')';
+      document.getElementById('cliFormTitleText').innerText = 'Edição de Ponto: ' + item.cliente;
+      document.getElementById('btnSalvarClienteText').innerText = 'Salvar Alterações';
+      document.getElementById('clienteForm').scrollIntoView({{ behavior: 'smooth', block: 'start' }});
+      lucide.createIcons();
+    }}
+
+    function excluirCliente(index) {{
+      if ((nivelAcessoLogado || '').trim().toLowerCase() !== 'geral') {{
+        alert('⛔ Operação não permitida: Apenas usuários com perfil Geral podem excluir clientes.');
+        return;
+      }}
+      const item = listaCadastroClientes[index];
+      if (!item) return;
+      const descr = item.cliente + ' - ' + (item.localInterno || item.local || '');
+      if (!confirm('Deseja realmente excluir o cadastro de "' + descr + '"?')) return;
+
+      abrirModalLoading('Excluindo Cliente...', 'Removendo o ponto "' + descr + '" da aba Clientes.', 'loading');
+      enviarParaPlanilhaGarantido({{
+        "action": "excluir_cliente", "acao": "excluir_cliente", "tipo": "excluir_cliente",
+        "aba": "Clientes", "sheet": "Clientes", "linha": item.linha || "",
+        "Cliente": item.cliente, "Local": item.local, "Local interno": item.localInterno,
+        "Máquina": item.maquina, "Modelo de máquina": item.modeloMaquina, "Filial Responsavel": item.filialResponsavel
+      }});
+
+      listaCadastroClientes.splice(index, 1);
+      renderizarTabelaClientes();
+      if (clienteEmEdicao && clienteEmEdicao.indexOriginal === index) limparFormCliente();
+
+      setTimeout(() => {{
+        abrirModalLoading('Cliente Excluído!', 'O cadastro foi removido com sucesso.', 'excluir');
+        setTimeout(fecharModalLoading, 1000);
+      }}, 500);
+    }}
+
+    function filtrarClientesCadastrados() {{
+      const termo = (document.getElementById('searchClientesCadastrados')?.value || '').trim().toLowerCase();
+      if (!termo) {{ renderizarTabelaClientes(listaCadastroClientes); return; }}
+      const filtrados = listaCadastroClientes.filter(c => Object.values(c).some(val => String(val || '').toLowerCase().includes(termo)));
+      renderizarTabelaClientes(filtrados);
+    }}
+
+    function renderizarTabelaClientes(lista = listaCadastroClientes) {{
+      const tbody = document.getElementById('tableClientesBody');
+      const badge = document.getElementById('badgeContadorClientes');
+      if (badge) badge.innerText = lista.length + ' cliente(s)';
+      if (!tbody) return;
+      if (!lista || lista.length === 0) {{
+        tbody.innerHTML = '<tr><td colspan="7" class="text-center py-6 text-slate-400 font-semibold">Nenhum cliente encontrado.</td></tr>';
+        return;
+      }}
+      tbody.innerHTML = lista.map((c, idx) => `
+        <tr class="hover:bg-slate-50 transition border-b border-slate-100">
+          <td class="text-center whitespace-nowrap">
+            <div class="inline-flex items-center gap-1 justify-center">
+              <button type="button" onclick="editarCliente(${{idx}})" title="Editar cadastro" class="p-1 rounded bg-sky-50 hover:bg-sky-100 text-sky-700 border border-sky-200 transition cursor-pointer">
+                <i data-lucide="edit-2" class="w-3.5 h-3.5"></i>
+              </button>
+              <button type="button" onclick="excluirCliente(${{idx}})" title="Excluir cadastro" class="p-1 rounded bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 transition cursor-pointer">
+                <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
+              </button>
+            </div>
+          </td>
+          <td class="font-bold text-slate-800 truncate" title="${{c.cliente || ''}}">${{c.cliente || '-'}}</td>
+          <td class="text-slate-600 truncate" title="${{c.local || ''}}">${{c.local || '-'}}</td>
+          <td class="text-slate-700 font-medium truncate" title="${{c.localInterno || ''}}">${{c.localInterno || '-'}}</td>
+          <td class="text-slate-600 font-mono truncate" title="${{c.maquina || ''}}">${{c.maquina || '-'}}</td>
+          <td class="text-slate-600 truncate" title="${{c.modeloMaquina || ''}}">${{c.modeloMaquina || '-'}}</td>
+          <td class="font-semibold text-sky-800 truncate" title="${{c.filialResponsavel || ''}}">${{c.filialResponsavel || '-'}}</td>
+        </tr>
+      `).join('');
+      lucide.createIcons();
+    }}
+
+    function handleClienteSubmit(e) {{
+      e.preventDefault();
+      if ((nivelAcessoLogado || '').trim().toLowerCase() !== 'geral') {{
+        alert('⛔ Apenas perfil Geral pode cadastrar clientes.'); return;
+      }}
+      const cliente = converterParaPrimeirasMaiusculas(document.getElementById('cadCliCliente').value.trim());
+      const local = converterParaPrimeirasMaiusculas(document.getElementById('cadCliLocal').value.trim());
+      const localInterno = converterParaPrimeirasMaiusculas(document.getElementById('cadCliLocalInterno').value.trim());
+      const maquina = converterParaPrimeirasMaiusculas(document.getElementById('cadCliMaquina').value.trim());
+      const modeloMaquina = converterParaPrimeirasMaiusculas(document.getElementById('cadCliModeloMaquina').value.trim());
+      const filialResponsavel = converterParaPrimeirasMaiusculas(document.getElementById('cadCliFilial').value.trim());
+      if (!cliente || !local || !localInterno || !maquina || !modeloMaquina || !filialResponsavel) {{
+        alert('Preencha todos os campos obrigatórios.'); return;
+      }}
+
+      const ehEdicao = (clienteEmEdicao !== null);
+      abrirModalLoading(ehEdicao ? 'Atualizando Cliente...' : 'Cadastrando Cliente...', 'Gravando na aba Clientes...', 'loading');
+
+      enviarParaPlanilhaGarantido({{
+        "acao": ehEdicao ? "editar_cliente" : "inserir_cliente",
+        "action": ehEdicao ? "editar_cliente" : "inserir_cliente",
+        "tipo": "cadastro_cliente", "aba": "Clientes", "sheet": "Clientes",
+        "linha": ehEdicao && clienteEmEdicao.linha ? clienteEmEdicao.linha : "",
+        "Cliente": cliente, "Local": local, "Local interno": localInterno,
+        "Máquina": maquina, "Modelo de máquina": modeloMaquina, "Filial Responsavel": filialResponsavel
+      }});
+
+      const novoItem = {{
+        linha: ehEdicao && clienteEmEdicao.linha ? clienteEmEdicao.linha : listaCadastroClientes.length + 2,
+        cliente, local, localInterno, maquina, modeloMaquina, filialResponsavel
+      }};
+      if (ehEdicao) listaCadastroClientes[clienteEmEdicao.indexOriginal] = novoItem;
+      else listaCadastroClientes.unshift(novoItem);
+
+      dadosSAC.clientes.push({{ cliente, local: localInterno, cidade: filialResponsavel }});
+      limparFormCliente();
+      renderizarTabelaClientes();
+      setTimeout(() => {{
+        abrirModalLoading('Cliente Salvo!', 'Registro gravado com sucesso.', 'sucesso');
+        setTimeout(fecharModalLoading, 1000);
+      }}, 500);
+    }}
+
+    // =========================================================================
+    // GRÁFICOS DO DASHBOARD SAC (CONFIGURAÇÕES & INSTÂNCIAS COM DATALABELS)
+    // =========================================================================
+    const filterSACCliente = document.getElementById('filterSACCliente');
+    const filterSACProduto = document.getElementById('filterSACProduto');
+    const filterSACAtendente = document.getElementById('filterSACAtendente');
+
+    function getHorizontalSACBarOptions() {{
+      const textColor = '#475569';
+      const gridColor = 'rgba(226, 232, 240, 0.7)';
+      return {{
+        indexAxis: 'y',
+        responsive: true,
+        maintainAspectRatio: false,
+        layout: {{ padding: {{ right: 40, left: 10, top: 10, bottom: 10 }} }},
+        plugins: {{
+          legend: {{ display: false }},
+          tooltip: {{
+            backgroundColor: '#ffffff', titleColor: '#0f172a', bodyColor: '#334155',
+            borderColor: '#e2e8f0', borderWidth: 1, padding: 10,
+            callbacks: {{ label: (c) => 'Ocorrências: ' + c.raw.toLocaleString('pt-BR') }}
+          }},
+          datalabels: {{
+            anchor: 'end', align: 'right', offset: 4, color: '#0f172a',
+            font: {{ family: 'Inter', weight: 'bold', size: 10 }},
+            formatter: (v) => v ? v.toLocaleString('pt-BR') : ''
+          }}
+        }},
+        scales: {{
+          x: {{ grid: {{ color: gridColor }}, ticks: {{ color: textColor, font: {{ size: 10 }} }}, beginAtZero: true }},
+          y: {{ grid: {{ display: false }}, ticks: {{ color: textColor, font: {{ size: 10, weight: '600' }} }} }}
+        }}
+      }};
+    }}
+
+    const chartTopProblemasSAC = new Chart(document.getElementById('chartTopProblemasSAC').getContext('2d'), {{
+      type: 'bar',
+      data: {{ labels: [], datasets: [{{ data: [], backgroundColor: 'rgba(2, 132, 199, 0.85)', borderRadius: 6 }}] }},
+      options: getHorizontalSACBarOptions()
+    }});
+
+    const chartAtendentesSAC = new Chart(document.getElementById('chartAtendentesSAC').getContext('2d'), {{
+      type: 'bar',
+      data: {{ labels: [], datasets: [{{ data: [], backgroundColor: 'rgba(16, 185, 129, 0.85)', borderRadius: 6 }}] }},
+      options: getHorizontalSACBarOptions()
+    }});
+
+    // NOVO: Top 5 do Dia: Quantidade & Valores R$
+    const chartTop5DiaQtd = new Chart(document.getElementById('chartTop5DiaQtd').getContext('2d'), {{
+      type: 'bar',
+      data: {{ labels: [], datasets: [{{ data: [], backgroundColor: 'rgba(2, 132, 199, 0.85)', borderRadius: 6 }}] }},
+      options: getHorizontalSACBarOptions()
+    }});
+
+    const chartTop5DiaVal = new Chart(document.getElementById('chartTop5DiaVal').getContext('2d'), {{
+      type: 'bar',
+      data: {{ labels: [], datasets: [{{ data: [], backgroundColor: 'rgba(16, 185, 129, 0.85)', borderRadius: 6 }}] }},
+      options: {{
+        indexAxis: 'y',
+        responsive: true,
+        maintainAspectRatio: false,
+        layout: {{ padding: {{ right: 50, left: 10, top: 10, bottom: 10 }} }},
+        plugins: {{
+          legend: {{ display: false }},
+          tooltip: {{
+            backgroundColor: '#ffffff', titleColor: '#0f172a', bodyColor: '#334155',
+            borderColor: '#e2e8f0', borderWidth: 1, padding: 10,
+            callbacks: {{ label: (c) => 'Valor: ' + formatCurrency(c.raw) }}
+          }},
+          datalabels: {{
+            anchor: 'end', align: 'right', offset: 4, color: '#047857',
+            font: {{ family: 'Inter', weight: 'bold', size: 9 }},
+            formatter: (v) => v ? 'R$' + Number(v).toLocaleString('pt-BR', {{ maximumFractionDigits: 0 }}) : ''
+          }}
+        }},
+        scales: {{
+          x: {{ grid: {{ color: 'rgba(226, 232, 240, 0.7)' }}, ticks: {{ color: '#475569', font: {{ size: 10 }} }}, beginAtZero: true }},
+          y: {{ grid: {{ display: false }}, ticks: {{ color: '#475569', font: {{ size: 10, weight: '600' }} }} }}
+        }}
+      }}
+    }});
+
+    // 1. Gráficos Divididos de Top 5 Locais (Mês Anterior & Mês Atual)
+    const chartLocaisAnterior = new Chart(document.getElementById('chartLocaisAnterior').getContext('2d'), {{
+      type: 'bar',
+      data: {{ labels: [], datasets: [{{ data: [], backgroundColor: 'rgba(100, 116, 139, 0.85)', borderRadius: 6 }}] }},
+      options: getHorizontalSACBarOptions()
+    }});
+
+    const chartLocaisAtual = new Chart(document.getElementById('chartLocaisAtual').getContext('2d'), {{
+      type: 'bar',
+      data: {{ labels: [], datasets: [{{ data: [], backgroundColor: 'rgba(79, 70, 229, 0.85)', borderRadius: 6 }}] }},
+      options: getHorizontalSACBarOptions()
+    }});
+
+    // 2. Gráficos Divididos de Chamados por Mês (Qtd & Valores R$) - AMBOS EM BARRAS
+    const chartMesesQtd = new Chart(document.getElementById('chartMesesQtd').getContext('2d'), {{
+      type: 'bar',
+      data: {{ labels: [], datasets: [{{ label: 'Quantidade', data: [], backgroundColor: 'rgba(2, 132, 199, 0.85)', borderRadius: 6 }}] }},
+      options: {{
+        responsive: true,
+        maintainAspectRatio: false,
+        layout: {{ padding: {{ top: 20 }} }},
+        plugins: {{
+          legend: {{ display: false }},
+          tooltip: {{ callbacks: {{ label: (c) => 'Chamados: ' + c.raw.toLocaleString('pt-BR') }} }},
+          datalabels: {{
+            anchor: 'end', align: 'top', offset: 2, color: '#0284c7',
+            font: {{ family: 'Inter', weight: 'bold', size: 10 }},
+            formatter: (v) => v ? v.toLocaleString('pt-BR') : ''
+          }}
+        }},
+        scales: {{
+          x: {{ ticks: {{ font: {{ size: 10 }} }} }},
+          y: {{ beginAtZero: true, ticks: {{ font: {{ size: 10 }} }} }}
+        }}
+      }}
+    }});
+
+    const chartMesesVal = new Chart(document.getElementById('chartMesesVal').getContext('2d'), {{
+      type: 'bar',
+      data: {{
+        labels: [],
+        datasets: [{{
+          label: 'Valor Ressarcido',
+          data: [],
+          backgroundColor: 'rgba(16, 185, 129, 0.85)',
+          borderRadius: 6
+        }}]
+      }},
+      options: {{
+        responsive: true,
+        maintainAspectRatio: false,
+        layout: {{ padding: {{ top: 22 }} }},
+        plugins: {{
+          legend: {{ display: false }},
+          tooltip: {{ callbacks: {{ label: (c) => 'Ressarcido: ' + formatCurrency(c.raw) }} }},
+          datalabels: {{
+            anchor: 'end', align: 'top', offset: 2, color: '#047857',
+            font: {{ family: 'Inter', weight: 'bold', size: 9 }},
+            formatter: (v) => v ? 'R$' + Number(v).toLocaleString('pt-BR', {{ maximumFractionDigits: 0 }}) : ''
+          }}
+        }},
+        scales: {{
+          x: {{ ticks: {{ font: {{ size: 10 }} }} }},
+          y: {{ beginAtZero: true, ticks: {{ font: {{ size: 10 }}, callback: (v) => 'R$ ' + v.toLocaleString('pt-BR') }} }}
+        }}
+      }}
+    }});
+
+    // 3. Gráficos Divididos de Chamados por Dia (Qtd & Valores R$) - AMBOS EM BARRAS & DIAS PREENCHIDOS
+    const chartDiasQtd = new Chart(document.getElementById('chartDiasQtd').getContext('2d'), {{
+      type: 'bar',
+      data: {{ labels: [], datasets: [{{ label: 'Quantidade', data: [], backgroundColor: 'rgba(14, 165, 233, 0.85)', borderRadius: 4 }}] }},
+      options: {{
+        responsive: true,
+        maintainAspectRatio: false,
+        layout: {{ padding: {{ top: 20 }} }},
+        plugins: {{
+          legend: {{ display: false }},
+          tooltip: {{ callbacks: {{ label: (c) => 'Chamados: ' + c.raw }} }},
+          datalabels: {{
+            anchor: 'end', align: 'top', offset: 2, color: '#0369a1',
+            font: {{ family: 'Inter', weight: 'bold', size: 10 }},
+            formatter: (v) => v ? v : ''
+          }}
+        }},
+        scales: {{
+          x: {{ ticks: {{ font: {{ size: 10 }} }} }},
+          y: {{ beginAtZero: true, ticks: {{ font: {{ size: 10 }} }} }}
+        }}
+      }}
+    }});
+
+    const chartDiasVal = new Chart(document.getElementById('chartDiasVal').getContext('2d'), {{
+      type: 'bar',
+      data: {{
+        labels: [],
+        datasets: [{{
+          label: 'Valor (R$)',
+          data: [],
+          backgroundColor: 'rgba(245, 158, 11, 0.85)',
+          borderRadius: 4
+        }}]
+      }},
+      options: {{
+        responsive: true,
+        maintainAspectRatio: false,
+        layout: {{ padding: {{ top: 22 }} }},
+        plugins: {{
+          legend: {{ display: false }},
+          tooltip: {{ callbacks: {{ label: (c) => 'Valor: ' + formatCurrency(c.raw) }} }},
+          datalabels: {{
+            anchor: 'end', align: 'top', offset: 2, color: '#b45309',
+            font: {{ family: 'Inter', weight: 'bold', size: 9 }},
+            formatter: (v) => v ? 'R$' + Number(v).toLocaleString('pt-BR', {{ maximumFractionDigits: 0 }}) : ''
+          }}
+        }},
+        scales: {{
+          x: {{ ticks: {{ font: {{ size: 10 }} }} }},
+          y: {{ beginAtZero: true, ticks: {{ font: {{ size: 10 }}, callback: (v) => 'R$' + v.toLocaleString('pt-BR') }} }}
+        }}
+      }}
+    }});
+
+    // 4. Gráfico Top 10 Locais na Semana / Período
+    const chartTop10Semana = new Chart(document.getElementById('chartTop10Semana').getContext('2d'), {{
+      type: 'bar',
+      data: {{ labels: [], datasets: [{{ data: [], backgroundColor: 'rgba(225, 29, 72, 0.85)', borderRadius: 6 }}] }},
+      options: getHorizontalSACBarOptions()
+    }});
+
+    // 5. Gráfico Top 3 Locais por Filial
+    const chartTop3Filial = new Chart(document.getElementById('chartTop3Filial').getContext('2d'), {{
+      type: 'bar',
+      data: {{ labels: [], datasets: [{{ data: [], backgroundColor: 'rgba(217, 119, 6, 0.85)', borderRadius: 6 }}] }},
+      options: getHorizontalSACBarOptions()
+    }});
+
+    // =========================================================================
+    // ATUALIZAÇÃO DOS GRÁFICOS DINÂMICOS
+    // =========================================================================
+    function parseDateToYMD(dStr) {{
+      if (!dStr) return '';
+      dStr = dStr.trim();
+      if (/^\\d{{4}}-\\d{{2}}-\\d{{2}}/.test(dStr)) return dStr.substring(0, 10);
+      const parts = dStr.split(/[/ -]/);
+      if (parts.length === 3) {{
+        if (parts[2].length === 4) return parts[2] + '-' + parts[1].padStart(2, '0') + '-' + parts[0].padStart(2, '0');
+        if (parts[0].length === 4) return parts[0] + '-' + parts[1].padStart(2, '0') + '-' + parts[2].padStart(2, '0');
+      }}
+      return '';
+    }}
+
+    // ATUALIZAÇÃO DO NOVO TOP 5 DO DIA: QUANTIDADE E VALORES
+    function atualizarGraficosTop5Dia() {{
+      const diaInput = document.getElementById('filterDiaTop5')?.value;
+      if (!diaInput) return;
+      const contQtd = {{}};
+      const contVal = {{}};
+
+      listaChamadosSAC.forEach(c => {{
+        const ymd = parseDateToYMD(c.data);
+        if (ymd === diaInput) {{
+          const loc = (c.localInterno || c.cliente || 'Outros').trim();
+          contQtd[loc] = (contQtd[loc] || 0) + 1;
+          contVal[loc] = (contVal[loc] || 0) + parseValorNumerico(c.valor);
+        }}
+      }});
+
+      const truncar = (t, max = 22) => t.length > max ? t.substring(0, max) + '...' : t;
+      
+      const top5Qtd = Object.entries(contQtd).map(([nome, qt]) => ({{ nome, qt }})).sort((a,b) => b.qt - a.qt).slice(0, 5);
+      chartTop5DiaQtd.data.labels = top5Qtd.map(t => truncar(t.nome));
+      chartTop5DiaQtd.data.datasets[0].data = top5Qtd.map(t => t.qt);
+      chartTop5DiaQtd.update();
+
+      const top5Val = Object.entries(contVal).map(([nome, vl]) => ({{ nome, vl }})).sort((a,b) => b.vl - a.vl).slice(0, 5);
+      chartTop5DiaVal.data.labels = top5Val.map(t => truncar(t.nome));
+      chartTop5DiaVal.data.datasets[0].data = top5Val.map(t => t.vl);
+      chartTop5DiaVal.update();
+    }}
+
+    // HELPER PARA RENDERIZAR LISTAS DE TOP 3 COM RESUMO POR PROBLEMA
+    function montarHtmlResumoTop3(listaFiltrada, containerId) {{
+      const container = document.getElementById(containerId);
+      if (!container) return;
+
+      const contLocais = {{}};
+      listaFiltrada.forEach(c => {{
+        const loc = (c.localInterno || c.cliente || 'Outros').trim();
+        const prob = (c.problemas || 'Outros').trim();
+        if (!contLocais[loc]) contLocais[loc] = {{ total: 0, probs: {{}} }};
+        contLocais[loc].total++;
+        contLocais[loc].probs[prob] = (contLocais[loc].probs[prob] || 0) + 1;
+      }});
+
+      const top3 = Object.entries(contLocais)
+        .map(([loc, info]) => ({{ loc, total: info.total, probs: info.probs }}))
+        .sort((a, b) => b.total - a.total)
+        .slice(0, 3);
+
+      if (!top3.length) {{
+        container.innerHTML = '<p class="text-xs text-slate-400 text-center py-6 font-semibold">Sem ocorrências no período selecionado.</p>';
+        return;
+      }}
+
+      container.innerHTML = top3.map((item, idx) => {{
+        const badgesProb = Object.entries(item.probs)
+          .sort((a,b) => b[1] - a[1])
+          .map(([p, qtd]) => `
+            <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-slate-100 text-[10px] font-medium text-slate-700 border border-slate-200">
+              <span class="truncate max-w-[120px]" title="${{p}}">${{p}}</span>
+              <strong class="text-sky-700">${{qtd}}</strong>
+            </span>
+          `).join('');
+
+        const medalhaCor = idx === 0 ? 'bg-amber-100 text-amber-800 border-amber-300' : (idx === 1 ? 'bg-slate-200 text-slate-800 border-slate-300' : 'bg-orange-100 text-orange-800 border-orange-300');
+
+        return `
+          <div class="p-3 rounded-xl border border-slate-100 bg-slate-50/70 hover:bg-slate-50 transition">
+            <div class="flex items-center justify-between gap-2 mb-1.5">
+              <div class="flex items-center gap-2 min-w-0">
+                <span class="w-5 h-5 rounded-full flex items-center justify-center font-bold text-[10px] border ${{medalhaCor}}">
+                  ${{idx + 1}}º
+                </span>
+                <span class="font-bold text-xs text-slate-800 truncate" title="${{item.loc}}">${{item.loc}}</span>
+              </div>
+              <span class="text-xs font-black text-sky-700 bg-sky-50 px-2 py-0.5 rounded border border-sky-200 whitespace-nowrap">
+                ${{item.total}} ${{item.total === 1 ? 'chamado' : 'chamados'}}
+              </span>
+            </div>
+            <div class="flex items-center gap-1.5 flex-wrap pt-1 border-t border-slate-200/60">
+              ${{badgesProb}}
+            </div>
+          </div>
+        `;
+      }}).join('');
+    }}
+
+    // ATUALIZAÇÃO DOS TOP 3 RESUMIDOS
+    function atualizarResumoTop3Mes() {{
+      const mesInput = document.getElementById('filterResumoMes')?.value;
+      if (!mesInput) return;
+      const filtrados = listaChamadosSAC.filter(c => {{
+        const ymd = parseDateToYMD(c.data);
+        return ymd && ymd.startsWith(mesInput);
+      }});
+      montarHtmlResumoTop3(filtrados, 'listaResumoTop3Mes');
+    }}
+
+    function atualizarResumoTop3Dia() {{
+      const diaInput = document.getElementById('filterResumoDia')?.value;
+      if (!diaInput) return;
+      const filtrados = listaChamadosSAC.filter(c => parseDateToYMD(c.data) === diaInput);
+      montarHtmlResumoTop3(filtrados, 'listaResumoTop3Dia');
+    }}
+
+    function atualizarResumoTop37Dias() {{
+      const dtFimInput = document.getElementById('filterResumo7DiasDtFim')?.value;
+      const filialInput = document.getElementById('filterResumo7DiasFilial')?.value || 'ALL';
+      if (!dtFimInput) return;
+
+      const dFim = new Date(dtFimInput + 'T23:59:59');
+      const dIni = new Date(dFim);
+      dIni.setDate(dIni.getDate() - 6);
+      const strDIni = dIni.toISOString().split('T')[0];
+
+      const filtrados = listaChamadosSAC.filter(c => {{
+        const ymd = parseDateToYMD(c.data);
+        if (!ymd || ymd < strDIni || ymd > dtFimInput) return false;
+        if (filialInput !== 'ALL' && (c.cidade || '').toLowerCase() !== filialInput.toLowerCase()) return false;
+        return true;
+      }});
+      montarHtmlResumoTop3(filtrados, 'listaResumoTop37Dias');
+    }}
+
+    function atualizarGraficoLocaisAnterior() {{
+      const mesAntInput = document.getElementById('filterMesLocaisAnterior')?.value;
+      if (!mesAntInput) return;
+      const cont = {{}};
+      listaChamadosSAC.forEach(c => {{
+        const ymd = parseDateToYMD(c.data);
+        if (ymd && ymd.startsWith(mesAntInput)) {{
+          const loc = (c.localInterno || c.cliente || 'Outros').trim();
+          cont[loc] = (cont[loc] || 0) + 1;
+        }}
+      }});
+      const truncar = (t, max = 22) => t.length > max ? t.substring(0, max) + '...' : t;
+      const top5 = Object.entries(cont).map(([nome, qt]) => ({{ nome, qt }})).sort((a,b) => b.qt - a.qt).slice(0, 5);
+      chartLocaisAnterior.data.labels = top5.map(t => truncar(t.nome));
+      chartLocaisAnterior.data.datasets[0].data = top5.map(t => t.qt);
+      chartLocaisAnterior.update();
+    }}
+
+    function atualizarGraficoLocaisAtual() {{
+      const mesAtualInput = document.getElementById('filterMesLocaisAtual')?.value;
+      if (!mesAtualInput) return;
+      const cont = {{}};
+      listaChamadosSAC.forEach(c => {{
+        const ymd = parseDateToYMD(c.data);
+        if (ymd && ymd.startsWith(mesAtualInput)) {{
+          const loc = (c.localInterno || c.cliente || 'Outros').trim();
+          cont[loc] = (cont[loc] || 0) + 1;
+        }}
+      }});
+      const truncar = (t, max = 22) => t.length > max ? t.substring(0, max) + '...' : t;
+      const top5 = Object.entries(cont).map(([nome, qt]) => ({{ nome, qt }})).sort((a,b) => b.qt - a.qt).slice(0, 5);
+      chartLocaisAtual.data.labels = top5.map(t => truncar(t.nome));
+      chartLocaisAtual.data.datasets[0].data = top5.map(t => t.qt);
+      chartLocaisAtual.update();
+    }}
+
+    function atualizarGraficoMesesQtd() {{
+      const selAno = document.getElementById('filterAnoMesesQtd')?.value || new Date().getFullYear();
+      const mesesNomes = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'];
+      const contQtd = Array(12).fill(0);
+      listaChamadosSAC.forEach(c => {{
+        const ymd = parseDateToYMD(c.data);
+        if (ymd && ymd.startsWith(String(selAno))) {{
+          const mIdx = parseInt(ymd.substring(5, 7), 10) - 1;
+          if (mIdx >= 0 && mIdx < 12) contQtd[mIdx]++;
+        }}
+      }});
+      chartMesesQtd.data.labels = mesesNomes;
+      chartMesesQtd.data.datasets[0].data = contQtd;
+      chartMesesQtd.update();
+    }}
+
+    function atualizarGraficoMesesVal() {{
+      const selAno = document.getElementById('filterAnoMesesVal')?.value || new Date().getFullYear();
+      const mesesNomes = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'];
+      const somaVal = Array(12).fill(0);
+      listaChamadosSAC.forEach(c => {{
+        const ymd = parseDateToYMD(c.data);
+        if (ymd && ymd.startsWith(String(selAno))) {{
+          const mIdx = parseInt(ymd.substring(5, 7), 10) - 1;
+          if (mIdx >= 0 && mIdx < 12) somaVal[mIdx] += parseValorNumerico(c.valor);
+        }}
+      }});
+      chartMesesVal.data.labels = mesesNomes;
+      chartMesesVal.data.datasets[0].data = somaVal;
+      chartMesesVal.update();
+    }}
+
+    // Pega exatamente os dias com dados preenchidos no mês selecionado
+    function atualizarGraficoDiasQtd() {{
+      const mesDiasInput = document.getElementById('filterMesDiasQtd')?.value;
+      let anoRef, mesRef;
+      if (mesDiasInput) {{
+        const parts = mesDiasInput.split('-');
+        anoRef = parseInt(parts[0], 10);
+        mesRef = parseInt(parts[1], 10);
+      }} else {{
+        const hoje = new Date();
+        anoRef = hoje.getFullYear();
+        mesRef = hoje.getMonth() + 1;
+      }}
+      const pad = (n) => String(n).padStart(2, '0');
+      const strAnoMes = anoRef + '-' + pad(mesRef);
+      const contagemPorDia = {{}};
+
+      listaChamadosSAC.forEach(c => {{
+        const ymd = parseDateToYMD(c.data);
+        if (ymd && ymd.startsWith(strAnoMes)) {{
+          const dia = ymd.substring(8, 10);
+          contagemPorDia[dia] = (contagemPorDia[dia] || 0) + 1;
+        }}
+      }});
+
+      // Ordena cronologicamente apenas os dias existentes
+      const diasPreenchidos = Object.keys(contagemPorDia).sort((a, b) => parseInt(a, 10) - parseInt(b, 10));
+      chartDiasQtd.data.labels = diasPreenchidos.map(d => 'Dia ' + d);
+      chartDiasQtd.data.datasets[0].data = diasPreenchidos.map(d => contagemPorDia[d]);
+      chartDiasQtd.update();
+    }}
+
+    // Pega exatamente os dias com valores preenchidos no mês selecionado
+    function atualizarGraficoDiasVal() {{
+      const mesDiasInput = document.getElementById('filterMesDiasVal')?.value;
+      let anoRef, mesRef;
+      if (mesDiasInput) {{
+        const parts = mesDiasInput.split('-');
+        anoRef = parseInt(parts[0], 10);
+        mesRef = parseInt(parts[1], 10);
+      }} else {{
+        const hoje = new Date();
+        anoRef = hoje.getFullYear();
+        mesRef = hoje.getMonth() + 1;
+      }}
+      const pad = (n) => String(n).padStart(2, '0');
+      const strAnoMes = anoRef + '-' + pad(mesRef);
+      const somaPorDia = {{}};
+
+      listaChamadosSAC.forEach(c => {{
+        const ymd = parseDateToYMD(c.data);
+        if (ymd && ymd.startsWith(strAnoMes)) {{
+          const dia = ymd.substring(8, 10);
+          const v = parseValorNumerico(c.valor);
+          if (v > 0 || !(dia in somaPorDia)) {{
+            somaPorDia[dia] = (somaPorDia[dia] || 0) + v;
+          }}
+        }}
+      }});
+
+      // Ordena cronologicamente apenas os dias existentes
+      const diasPreenchidos = Object.keys(somaPorDia).sort((a, b) => parseInt(a, 10) - parseInt(b, 10));
+      chartDiasVal.data.labels = diasPreenchidos.map(d => 'Dia ' + d);
+      chartDiasVal.data.datasets[0].data = diasPreenchidos.map(d => somaPorDia[d]);
+      chartDiasVal.update();
+    }}
+
+    function atualizarGraficoTopSemana() {{
+      const dtIni = document.getElementById('filterTopSemanaDtIni')?.value;
+      const dtFim = document.getElementById('filterTopSemanaDtFim')?.value;
+      const cont = {{}};
+
+      listaChamadosSAC.forEach(c => {{
+        const ymd = parseDateToYMD(c.data);
+        if (!ymd) return;
+        if (dtIni && ymd < dtIni) return;
+        if (dtFim && ymd > dtFim) return;
+        const loc = (c.localInterno || c.cliente || 'Outros').trim();
+        cont[loc] = (cont[loc] || 0) + 1;
+      }});
+
+      const truncar = (t, max = 26) => t.length > max ? t.substring(0, max) + '...' : t;
+      const top10 = Object.entries(cont).map(([nome, qt]) => ({{ nome, qt }})).sort((a,b) => b.qt - a.qt).slice(0, 10);
+      chartTop10Semana.data.labels = top10.map(t => truncar(t.nome));
+      chartTop10Semana.data.datasets[0].data = top10.map(t => t.qt);
+      chartTop10Semana.update();
+    }}
+
+    function atualizarGraficoTopFilial() {{
+      const filial = document.getElementById('filterTopFilialSelect')?.value || 'ALL';
+      const dtIni = document.getElementById('filterTopFilialDtIni')?.value;
+      const dtFim = document.getElementById('filterTopFilialDtFim')?.value;
+      const cont = {{}};
+
+      listaChamadosSAC.forEach(c => {{
+        const ymd = parseDateToYMD(c.data);
+        if (!ymd) return;
+        if (dtIni && ymd < dtIni) return;
+        if (dtFim && ymd > dtFim) return;
+        if (filial !== 'ALL' && (c.cidade || '').toLowerCase() !== filial.toLowerCase()) return;
+        const loc = (c.localInterno || c.cliente || 'Outros').trim();
+        cont[loc] = (cont[loc] || 0) + 1;
+      }});
+
+      const truncar = (t, max = 26) => t.length > max ? t.substring(0, max) + '...' : t;
+      const top3 = Object.entries(cont).map(([nome, qt]) => ({{ nome, qt }})).sort((a,b) => b.qt - a.qt).slice(0, 3);
+      chartTop3Filial.data.labels = top3.map(t => truncar(t.nome));
+      chartTop3Filial.data.datasets[0].data = top3.map(t => t.qt);
+      chartTop3Filial.update();
+    }}
+
+    function inicializarFiltrosDashboardSAC() {{
+      const clientesUnicos = [...new Set(listaChamadosSAC.map(c => c.cliente).filter(Boolean))].sort();
+      filterSACCliente.innerHTML = '<option value="ALL">Todos os Clientes</option>';
+      clientesUnicos.forEach(cli => {{
+        const opt = document.createElement('option'); opt.value = cli; opt.textContent = cli;
+        filterSACCliente.appendChild(opt);
+      }});
+
+      const atendentesUnicos = [...new Set(listaChamadosSAC.map(c => c.atendente).filter(Boolean))].sort();
+      filterSACAtendente.innerHTML = '<option value="ALL">Todos os Atendentes</option>';
+      atendentesUnicos.forEach(a => {{
+        const opt = document.createElement('option'); opt.value = a; opt.textContent = a;
+        filterSACAtendente.appendChild(opt);
+      }});
+
+      const anosUnicos = [...new Set(listaChamadosSAC.map(c => {{
+        const ymd = parseDateToYMD(c.data);
+        return ymd ? ymd.substring(0, 4) : '';
+      }}).filter(Boolean))].sort().reverse();
+      const anoAtual = String(new Date().getFullYear());
+      if (!anosUnicos.length) anosUnicos.push(anoAtual);
+
+      const selAnoQtd = document.getElementById('filterAnoMesesQtd');
+      const selAnoVal = document.getElementById('filterAnoMesesVal');
+      selAnoQtd.innerHTML = '';
+      selAnoVal.innerHTML = '';
+      anosUnicos.forEach(a => {{
+        const opt1 = document.createElement('option'); opt1.value = a; opt1.textContent = a; selAnoQtd.appendChild(opt1);
+        const opt2 = document.createElement('option'); opt2.value = a; opt2.textContent = a; selAnoVal.appendChild(opt2);
+      }});
+      selAnoQtd.value = anosUnicos.includes(anoAtual) ? anoAtual : anosUnicos[0];
+      selAnoVal.value = anosUnicos.includes(anoAtual) ? anoAtual : anosUnicos[0];
+
+      const hoje = new Date();
+      const pad = (n) => String(n).padStart(2, '0');
+      const anoHoje = hoje.getFullYear();
+      const mesHoje = hoje.getMonth() + 1;
+      const strMesAtual = anoHoje + '-' + pad(mesHoje);
+      const strHoje = hoje.toISOString().split('T')[0];
+
+      let mesAnt = mesHoje - 1;
+      let anoAnt = anoHoje;
+      if (mesAnt === 0) {{ mesAnt = 12; anoAnt--; }}
+      const strMesAnt = anoAnt + '-' + pad(mesAnt);
+
+      const elLocAnt = document.getElementById('filterMesLocaisAnterior');
+      if (elLocAnt) elLocAnt.value = strMesAnt;
+
+      const elLocAtu = document.getElementById('filterMesLocaisAtual');
+      if (elLocAtu) elLocAtu.value = strMesAtual;
+
+      const elDiasQtd = document.getElementById('filterMesDiasQtd');
+      if (elDiasQtd) elDiasQtd.value = strMesAtual;
+
+      const elDiasVal = document.getElementById('filterMesDiasVal');
+      if (elDiasVal) elDiasVal.value = strMesAtual;
+
+      // Inicializa os filtros novos focados no Mês / Dia Atual
+      const elTop5Dia = document.getElementById('filterDiaTop5');
+      if (elTop5Dia) elTop5Dia.value = strHoje;
+
+      const elResumoMes = document.getElementById('filterResumoMes');
+      if (elResumoMes) elResumoMes.value = strMesAtual;
+
+      const elResumoDia = document.getElementById('filterResumoDia');
+      if (elResumoDia) elResumoDia.value = strHoje;
+
+      const elResumo7Fim = document.getElementById('filterResumo7DiasDtFim');
+      if (elResumo7Fim) elResumo7Fim.value = strHoje;
+
+      const dFim = strHoje;
+      const dIniDate = new Date();
+      dIniDate.setDate(dIniDate.getDate() - 7);
+      const dIni = dIniDate.toISOString().split('T')[0];
+
+      const sDtIni = document.getElementById('filterTopSemanaDtIni');
+      const sDtFim = document.getElementById('filterTopSemanaDtFim');
+      if (sDtIni) sDtIni.value = dIni;
+      if (sDtFim) sDtFim.value = dFim;
+
+      const fDtIni = document.getElementById('filterTopFilialDtIni');
+      const fDtFim = document.getElementById('filterTopFilialDtFim');
+      if (fDtIni) fDtIni.value = dIni;
+      if (fDtFim) fDtFim.value = dFim;
+
+      const selFilial = document.getElementById('filterTopFilialSelect');
+      selFilial.innerHTML = '<option value="ALL">Todas as Filiais</option>';
+      const filiais = [...new Set(listaChamadosSAC.map(c => c.cidade).filter(Boolean))].sort();
+      filiais.forEach(f => {{
+        const opt = document.createElement('option'); opt.value = f; opt.textContent = f;
+        selFilial.appendChild(opt);
+      }});
+
+      const selFilialResumo = document.getElementById('filterResumo7DiasFilial');
+      if (selFilialResumo) {{
+        selFilialResumo.innerHTML = '<option value="ALL">Todas as Filiais</option>';
+        filiais.forEach(f => {{
+          const opt = document.createElement('option'); opt.value = f; opt.textContent = f;
+          selFilialResumo.appendChild(opt);
+        }});
+      }}
+    }}
+    inicializarFiltrosDashboardSAC();
+
+    function atualizarDashboardSAC() {{
+      const cliVal = filterSACCliente.value;
+      const prodVal = filterSACProduto.value;
+      const atendVal = filterSACAtendente.value;
+
+      const filtrados = listaChamadosSAC.filter(item => {{
+        const matchCli = (cliVal === 'ALL' || (item.cliente && item.cliente.toLowerCase() === cliVal.toLowerCase()));
+        const matchProd = (prodVal === 'ALL' || (item.produto && item.produto.toLowerCase() === prodVal.toLowerCase()));
+        const matchAtend = (atendVal === 'ALL' || (item.atendente && item.atendente.toLowerCase() === atendVal.toLowerCase()));
+        return matchCli && matchProd && matchAtend;
+      }});
+
+      document.getElementById('badgeFiltroSAC').innerText = 'Filtrando: Cliente [' + cliVal + '] · Produto [' + prodVal + '] · Atendente [' + atendVal + ']';
+
+      const totalChamados = filtrados.length;
+      let somaValor = 0;
+      let chamadosCafe = 0;
+      let chamadosSnaky = 0;
+
+      filtrados.forEach(c => {{
+        somaValor += parseValorNumerico(c.valor);
+        const pLower = (c.produto || '').toLowerCase();
+        if (pLower.includes('café') || pLower.includes('cafe')) chamadosCafe++;
+        else if (pLower.includes('snaky') || pLower.includes('snack')) chamadosSnaky++;
+      }});
+
+      const pctCafe = totalChamados > 0 ? Math.round((chamadosCafe / totalChamados) * 100) : 0;
+      const pctSnaky = totalChamados > 0 ? Math.round((chamadosSnaky / totalChamados) * 100) : 0;
+      const ticketMedio = totalChamados > 0 ? (somaValor / totalChamados) : 0;
+
+      document.getElementById('kpiSACTotal').innerText = totalChamados.toLocaleString('pt-BR');
+      document.getElementById('kpiSACTotalSub').innerText = totalChamados + ' ocorrências registradas';
+      document.getElementById('kpiSACValorTotal').innerText = formatCurrency(somaValor);
+      document.getElementById('kpiSACCafé').innerText = chamadosCafe.toLocaleString('pt-BR');
+      document.getElementById('kpiSACCaféPct').innerText = pctCafe + '%';
+      document.getElementById('kpiSACSnaky').innerText = chamadosSnaky.toLocaleString('pt-BR');
+      document.getElementById('kpiSACSnakyPct').innerText = pctSnaky + '%';
+      document.getElementById('kpiSACClientes').innerText = new Set(filtrados.map(c => c.cliente)).size;
+      document.getElementById('kpiSACTicketMedio').innerText = formatCurrency(ticketMedio);
+
+      // Atualiza Top Problemas
+      const probContagem = {{}};
+      filtrados.forEach(c => {{
+        const p = (c.problemas || 'Outros').trim();
+        probContagem[p] = (probContagem[p] || 0) + 1;
+      }});
+      const truncar = (t, max = 28) => t.length > max ? t.substring(0, max) + '...' : t;
+      const top10Problemas = Object.entries(probContagem).map(([nome, qt]) => ({{ nome, qt }})).sort((a,b) => b.qt - a.qt).slice(0, 10);
+      chartTopProblemasSAC.data.labels = top10Problemas.map(p => truncar(p.nome));
+      chartTopProblemasSAC.data.datasets[0].data = top10Problemas.map(p => p.qt);
+      chartTopProblemasSAC.update();
+
+      // Atualiza Chamados por Atendente
+      const atendContagem = {{}};
+      filtrados.forEach(c => {{
+        const a = (c.atendente || 'Não Informado').trim();
+        atendContagem[a] = (atendContagem[a] || 0) + 1;
+      }});
+      const topAtendentes = Object.entries(atendContagem).map(([nome, qt]) => ({{ nome, qt }})).sort((a,b) => b.qt - a.qt).slice(0, 10);
+      chartAtendentesSAC.data.labels = topAtendentes.map(a => truncar(a.nome));
+      chartAtendentesSAC.data.datasets[0].data = topAtendentes.map(a => a.qt);
+      chartAtendentesSAC.update();
+
+      // Dispara renderização dos gráficos divididos e novos blocos
+      atualizarGraficosTop5Dia();
+      atualizarResumoTop3Mes();
+      atualizarResumoTop3Dia();
+      atualizarResumoTop37Dias();
+      atualizarGraficoLocaisAnterior();
+      atualizarGraficoLocaisAtual();
+      atualizarGraficoMesesQtd();
+      atualizarGraficoMesesVal();
+      atualizarGraficoDiasQtd();
+      atualizarGraficoDiasVal();
+      atualizarGraficoTopSemana();
+      atualizarGraficoTopFilial();
+    }}
+
+    [filterSACCliente, filterSACProduto, filterSACAtendente].forEach(el => el.addEventListener('change', atualizarDashboardSAC));
+    document.getElementById('btnLimparFiltrosSAC').addEventListener('click', () => {{
+      filterSACCliente.value = 'ALL';
+      filterSACProduto.value = 'ALL';
+      filterSACAtendente.value = 'ALL';
+      atualizarDashboardSAC();
+    }});
+
+    verificarEstadoAutenticacao();
+  </script>
+</body>
+</html>
+"""
+
+components.html(html_code, height=4800, scrolling=True)
